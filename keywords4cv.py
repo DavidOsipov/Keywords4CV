@@ -7,6 +7,7 @@ from typing import Dict, List, Set, Tuple
 import pandas as pd
 import nltk
 from nltk.stem import WordNetLemmatizer
+from nltk.corpus import wordnet
 import yaml
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -17,8 +18,9 @@ logger = logging.getLogger(__name__)
 
 # --- Download NLTK Resources ---
 def download_nltk_resources():
-    """Downloads necessary NLTK resources."""
-    for resource in ['punkt', 'wordnet', 'averaged_perceptron_tagger']:
+    """Downloads necessary NLTK resources if not already present."""
+    resources = ['punkt', 'wordnet', 'averaged_perceptron_tagger']
+    for resource in resources:
         try:
             nltk.data.find(f'tokenizers/{resource}' if resource == 'punkt' else f'corpora/{resource}' if resource == 'wordnet' else f'taggers/{resource}')
         except LookupError:
@@ -47,37 +49,41 @@ def get_synonyms(word: str, pos: str = None) -> Set[str]:
                 synonyms.add(synonym)
     return synonyms
 
-def _is_likely_skill(token: spacy.tokens.Token) -> bool:
-    """Checks if a token is likely part of a skill phrase (simplified)."""
-    if token.dep_ == "compound":  # Compound nouns (e.g., "data analysis")
-        return True
-    if token.pos_ == "VERB" and token.text.endswith("ing"): # Check verbs
-        return True
-    if token.pos_ == "NOUN": # Check nouns
-        return True
-
-    return False
-
-
 # --- Classes ---
 class TextPreprocessor:
-    """Handles text preprocessing."""
+    """Handles text preprocessing tasks."""
 
     def __init__(self, config: Dict):
-        """Initializes the TextPreprocessor with configuration."""
+        """
+        Initializes the TextPreprocessor with configuration.
+
+        Args:
+            config (Dict): Configuration dictionary containing stop words.
+        """
         self.config = config
         self.stop_words = self._load_stop_words()
-        self.lemmatizer = WordNetLemmatizer() # Use WordNetLemmatizer
+        self.lemmatizer = WordNetLemmatizer()
 
     def _load_stop_words(self) -> Set[str]:
-        """Loads stop words from the configuration."""
+        """Loads and configures stop words from the configuration."""
         stop_words = set(self.config['stop_words'])
         stop_words.update(self.config.get('stop_words_add', []))
         stop_words.difference_update(self.config.get('stop_words_exclude', []))
         return stop_words
 
     def preprocess_text(self, text: str) -> str:
-        """Cleans and standardizes text."""
+        """
+        Cleans and standardizes input text.
+
+        Removes newlines, tabs, URLs, email addresses, and punctuation (except hyphens),
+        and converts text to lowercase.
+
+        Args:
+            text (str): The input text to preprocess.
+
+        Returns:
+            str: The preprocessed text.
+        """
         try:
             text = text.lower()
             text = re.sub(r'[\n\t]+', ' ', text)          # Remove newlines and tabs
@@ -91,7 +97,18 @@ class TextPreprocessor:
             raise
 
     def tokenize_and_lemmatize(self, text: str) -> List[str]:
-        """Tokenizes, lemmatizes, and filters text."""
+        """
+        Tokenizes, lemmatizes, and filters text using spaCy and WordNetLemmatizer.
+
+        Filters out stop words, short words, and numeric tokens. Lemmatizes nouns, adjectives,
+        proper nouns, and verbs.
+
+        Args:
+            text (str): The input text to tokenize and lemmatize.
+
+        Returns:
+            List[str]: A list of lemmatized tokens.
+        """
         doc = nlp(text)
         tokens = []
         for token in doc:
@@ -106,78 +123,179 @@ class TextPreprocessor:
 
 
 class KeywordExtractor:
-    """Extracts keywords from preprocessed text."""
+    """Extracts keywords from preprocessed text using various methods."""
 
     def __init__(self, config: Dict):
-        """Initializes the KeywordExtractor with configuration."""
+        """
+        Initializes the KeywordExtractor with configuration.
+
+        Args:
+            config (Dict): Configuration dictionary containing skills whitelist and allowed entity types.
+        """
         self.config = config
         self.skills_whitelist = set(self.config['skills_whitelist'])
         self.preprocessor = TextPreprocessor(self.config)
         self.allowed_entity_types = set(self.config.get('allowed_entity_types', ["ORG", "PRODUCT"])) # Configurable entity types
 
     def extract_ngrams(self, tokens: List[str], n: int) -> List[str]:
-        """Generates n-grams from a list of tokens."""
+        """
+        Generates n-grams from a list of tokens.
+
+        Args:
+            tokens (List[str]): List of tokens.
+            n (int): The degree of n-gram (e.g., 2 for bigrams, 3 for trigrams).
+
+        Returns:
+            List[str]: List of n-grams.
+        """
         return [' '.join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
 
     def get_keywords(self, text: str) -> Counter:
-        """Extracts keywords, including synonyms and named entities."""
+        """
+        Extracts keywords from text using multiple methods:
+
+        - Whitelisted skills
+        - Lemmatized tokens
+        - Noun chunks
+        - Named Entities (NER)
+        - Bigrams and Trigrams
+
+        Args:
+            text (str): The input text to extract keywords from.
+
+        Returns:
+            Counter: A Counter object containing keywords and their frequencies.
+        """
         try:
             processed_text = self.preprocessor.preprocess_text(text)
             tokens = self.preprocessor.tokenize_and_lemmatize(processed_text)
             keywords = Counter()
 
-            # Add whitelisted skills directly
-            for skill in self.skills_whitelist:
-                if skill in processed_text:
-                    keywords[skill] += 1
+            # 1. Add whitelisted skills directly if present in the text
+            self._extract_whitelisted_skills(processed_text, keywords)
 
-            # Add lemmatized tokens
+            # 2. Add lemmatized tokens (unigrams)
             keywords.update(tokens)
 
-            # Noun chunks (simplified)
-            doc = nlp(processed_text)  # Process with spaCy *after* preprocessing
-            for chunk in doc.noun_chunks:
-              chunk_text = chunk.text.lower()
-              if any(word in self.skills_whitelist or word not in self.preprocessor.stop_words for word in chunk_text.split()):
-                keywords[chunk_text] += 1
+            # 3. Extract and add noun chunks
+            self._extract_noun_chunks(processed_text, keywords)
 
+            # 4. Extract and add Named Entities (NER) of allowed types
+            self._extract_named_entities(processed_text, keywords)
 
-            # NER (using allowed entity types)
-            for ent in doc.ents:
-                if ent.label_ in self.allowed_entity_types:
-                    entity_text = self.preprocessor.preprocess_text(ent.text.lower())
-                    if entity_text: # and entity_text not in self.preprocessor.stop_words:  # Optional: re-check stop words
-                        keywords[entity_text] += 1
+            # 5. Generate and add filtered bigrams and trigrams
+            self._extract_ngrams_keywords(tokens, keywords)
 
-            # Bigrams and Trigrams (filtered)
-            tokens_text = [t for t in tokens]
-            for n in [2, 3]:
-                for ngram in self.extract_ngrams(tokens_text, n):
-                    if any(word in self.skills_whitelist for word in ngram.split()) or all(word not in self.preprocessor.stop_words for word in ngram.split()):
-                        keywords[ngram] += 1
             return keywords
 
         except Exception as e:
             logger.error(f"Error in keyword extraction: {e}")
             raise
 
+    def _extract_whitelisted_skills(self, processed_text: str, keywords: Counter):
+        """Extracts whitelisted skills from processed text and updates keywords."""
+        for skill in self.skills_whitelist:
+            if skill in processed_text:
+                keywords[skill] += 1
+
+    def _extract_noun_chunks(self, processed_text: str, keywords: Counter):
+        """Extracts noun chunks from processed text and updates keywords."""
+        doc = nlp(processed_text)  # Process with spaCy *after* preprocessing
+        for chunk in doc.noun_chunks:
+            chunk_text = chunk.text.lower()
+            if any(word in self.skills_whitelist or word not in self.preprocessor.stop_words for word in chunk_text.split()):
+                keywords[chunk_text] += 1
+
+    def _extract_named_entities(self, processed_text: str, keywords: Counter):
+        """Extracts named entities from processed text and updates keywords."""
+        doc = nlp(processed_text)
+        for ent in doc.ents:
+            if ent.label_ in self.allowed_entity_types:
+                entity_text = self.preprocessor.preprocess_text(ent.text.lower())
+                if entity_text:
+                    keywords[entity_text] += 1
+
+    def _extract_ngrams_keywords(self, tokens: List[str], keywords: Counter):
+        """Extracts filtered n-grams (bigrams and trigrams) and updates keywords."""
+        tokens_text = [t for t in tokens]
+        for n in [2, 3]:
+            for ngram in self.extract_ngrams(tokens_text, n):
+                if any(word in self.skills_whitelist for word in ngram.split()) or all(word not in self.preprocessor.stop_words for word in ngram.split()):
+                    keywords[ngram] += 1
+
 
 class JobDescriptionAnalyzer:
-    """Analyzes job descriptions, computes TF-IDF, and generates output."""
+    """Analyzes job descriptions to extract keywords and compute TF-IDF."""
 
     def __init__(self, config: Dict):
-        """Initializes the JobDescriptionAnalyzer with configuration."""
+        """
+        Initializes the JobDescriptionAnalyzer with configuration.
+
+        Args:
+            config (Dict): Configuration dictionary containing keyword categories and other settings.
+        """
         self.config = config
         self.extractor = KeywordExtractor(self.config)
         self.keyword_categories = self.config.get('keyword_categories', {})
 
     def analyze_job_descriptions(self, job_descriptions: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Analyzes job descriptions and returns summary and pivot DataFrames."""
-        # Input Validation
+        """
+        Analyzes a dictionary of job descriptions, calculates TF-IDF, and generates summary and pivot tables.
+
+        Args:
+            job_descriptions (Dict[str, str]): A dictionary where keys are job titles and values are job descriptions.
+
+        Returns:
+            Tuple[pd.DataFrame, pd.DataFrame]: A tuple containing two pandas DataFrames:
+                - summary_stats: DataFrame summarizing keyword TF-IDF across all jobs.
+                - pivot_df: DataFrame pivoting TF-IDF scores with keywords as rows and job titles as columns.
+        """
+        self._validate_job_descriptions_input_type(job_descriptions)
+        self._validate_job_descriptions_length(job_descriptions)
+        self._validate_job_description_contents(job_descriptions)
+
+        job_texts = list(job_descriptions.values())
+
+        vectorizer = TfidfVectorizer(
+            analyzer='word',
+            tokenizer=self.extractor.get_keywords,
+            preprocessor=None, # Preprocessing handled within get_keywords
+            ngram_range=(1, 3), # Consider unigrams, bigrams, and trigrams directly
+            sublinear_tf=True,
+            use_idf=True
+        )
+
+        try:
+            tfidf_matrix = vectorizer.fit_transform(job_texts)
+            feature_names = vectorizer.get_feature_names_out()
+            keyword_data = self._extract_keyword_data(job_descriptions, tfidf_matrix, feature_names)
+
+            df = pd.DataFrame(keyword_data)
+            if df.empty:
+                logger.warning("No keywords were extracted.")
+                return pd.DataFrame(), pd.DataFrame()
+
+            pivot_df = self._create_pivot_table(df)
+            summary_stats = self._create_summary_stats(df)
+
+            return summary_stats, pivot_df
+
+        except Exception as e:
+            logger.error(f"Error in job description analysis: {e}")
+            raise
+
+    def _validate_job_descriptions_input_type(self, job_descriptions: Dict[str, str]):
+        """Validates if job_descriptions is a dictionary."""
         if not isinstance(job_descriptions, dict):
             raise TypeError("job_descriptions must be a dictionary.")
+
+    def _validate_job_descriptions_length(self, job_descriptions: Dict[str, str]):
+        """Validates the length of the job_descriptions dictionary."""
         if not (2 <= len(job_descriptions) <= 100):
             raise ValueError("job_descriptions must contain between 2 and 100 entries.")
+
+    def _validate_job_description_contents(self, job_descriptions: Dict[str, str]):
+        """Validates the content of each job description."""
         for title, description in job_descriptions.items():
             if not isinstance(title, str):
                 raise TypeError(f"Job title '{title}' must be a string.")
@@ -188,78 +306,63 @@ class JobDescriptionAnalyzer:
             if len(description.split()) < 10:
                 logger.warning(f"Job description for '{title}' is very short. Results may be unreliable.")
 
-        job_texts = list(job_descriptions.values())
 
-        # TF-IDF Vectorization (using custom tokenizer)
-        vectorizer = TfidfVectorizer(
-            analyzer='word',
-            tokenizer=self.extractor.get_keywords,
-            preprocessor=None, # Preprocessing handled within get_keywords
-            ngram_range=(1, 3), # Consider unigrams, bigrams, and trigrams directly
-            sublinear_tf=True,
-            use_idf=True
-        )
+    def _extract_keyword_data(self, job_descriptions: Dict[str, str], tfidf_matrix, feature_names) -> List[Dict]:
+        """Extracts keyword data from TF-IDF matrix and feature names."""
+        keyword_data = []
+        for i, job_title in enumerate(job_descriptions):
+            doc_vector = tfidf_matrix[i].tocoo()
+            for j, score in zip(doc_vector.col, doc_vector.data):
+                keyword = feature_names[j]
+                category = self._categorize_keyword(keyword)
+                keyword_data.append({
+                    'keyword': keyword,
+                    'job_title': job_title,
+                    'tfidf': score,
+                    'category': category
+                })
+        return keyword_data
 
+    def _categorize_keyword(self, keyword: str) -> str:
+        """Categorizes a keyword based on configured keyword categories."""
+        category = "Other"
+        for cat, keywords_list in self.keyword_categories.items():
+            if any(kw in keyword for kw in keywords_list): # Check if extracted keyword contains category keyword
+                category = cat
+                break
+        return category
 
-        try:
+    def _create_pivot_table(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Creates a pivot table from the keyword DataFrame."""
+        return df.pivot_table(index='keyword', columns='job_title', values='tfidf', aggfunc='sum', fill_value=0)
 
-            tfidf_matrix = vectorizer.fit_transform(job_texts)
-            feature_names = vectorizer.get_feature_names_out()
+    def _create_summary_stats(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Creates summary statistics from the keyword DataFrame."""
+        summary_stats = df.groupby('keyword').agg(
+            total_tfidf=('tfidf', 'sum'),
+            job_count=('job_title', 'nunique'),
+            avg_tfidf=('tfidf', 'mean')
+        ).reset_index()
 
-            keyword_data = []
-            for i, job_title in enumerate(job_descriptions):
-                doc_vector = tfidf_matrix[i].tocoo()
-                for j, score in zip(doc_vector.col, doc_vector.data):
-                    keyword = feature_names[j]
-                    category = "Other"
-                    # Categorize keywords (using 'in' for substring matching)
-                    for cat, keywords_list in self.keyword_categories.items():
-                        if any(kw in keyword for kw in keywords_list): # Check if extracted keyword contains category keyword
-                            category = cat
-                            break
+        summary_stats = summary_stats.sort_values('total_tfidf', ascending=False)
+        summary_stats.rename(columns={
+            'total_tfidf': 'Total TF-IDF',
+            'job_count': 'Job Count',
+            'avg_tfidf': 'Average TF-IDF'
+        }, inplace=True)
+        return summary_stats
 
-                    keyword_data.append({
-                        'keyword': keyword,
-                        'job_title': job_title,
-                        'tfidf': score,
-                        'category': category
-                    })
-
-            df = pd.DataFrame(keyword_data)
-
-            if df.empty:
-                logger.warning("No keywords were extracted.")
-                return pd.DataFrame(), pd.DataFrame()
-
-            # Pivot table: keywords vs job titles
-            pivot_df = df.pivot_table(index='keyword', columns='job_title', values='tfidf', aggfunc='sum', fill_value=0)
-
-            # Summary statistics
-            summary_stats = df.groupby('keyword').agg(
-                total_tfidf=('tfidf', 'sum'),
-                job_count=('job_title', 'nunique'),
-                avg_tfidf=('tfidf', 'mean')
-            ).reset_index()
-
-            summary_stats = summary_stats.sort_values('total_tfidf', ascending=False)
-            summary_stats.rename(columns={
-                'total_tfidf': 'Total TF-IDF',
-                'job_count': 'Job Count',
-                'avg_tfidf': 'Average TF-IDF'
-            }, inplace=True)
-
-            return summary_stats, pivot_df
-
-        except Exception as e:
-            logger.error(f"Error in job description analysis: {e}")
-            raise
-    # ... (rest of the JobDescriptionAnalyzer class)
 
 class JobKeywordAnalyzer:
-    """Main class to coordinate the analysis."""
+    """Orchestrates job keyword analysis using configuration and analyzer classes."""
 
     def __init__(self, config_file: str = "config.yaml"):
-        """Initializes the JobKeywordAnalyzer with the configuration file."""
+        """
+        Initializes the JobKeywordAnalyzer by loading configuration from a YAML file.
+
+        Args:
+            config_file (str): Path to the YAML configuration file. Defaults to "config.yaml".
+        """
         try:
             with open(config_file, 'r') as f:
                 self.config = yaml.safe_load(f)
@@ -273,13 +376,26 @@ class JobKeywordAnalyzer:
         self.analyzer = JobDescriptionAnalyzer(self.config)
 
     def analyze_jobs(self, job_descriptions: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Analyzes job descriptions and returns the results."""
+        """
+        Analyzes job descriptions using the configured JobDescriptionAnalyzer.
+
+        Args:
+            job_descriptions (Dict[str, str]): A dictionary of job titles and descriptions.
+
+        Returns:
+            Tuple[pd.DataFrame, pd.DataFrame]: Summary and pivot DataFrames from the analysis.
+        """
         return self.analyzer.analyze_job_descriptions(job_descriptions)
 
 
 
 def main():
-    """Main function to perform analysis and save results."""
+    """
+    Main function to execute job keyword analysis, save results, and display top keywords.
+
+    Loads configuration, analyzes job descriptions, saves output to Excel, and prints
+    the top keywords by TF-IDF.
+    """
 
     try:
         analyzer = JobKeywordAnalyzer()
@@ -345,7 +461,7 @@ def main():
         print(summary_df[['keyword', 'Total TF-IDF']].head(20))
 
 
-    except Exception as e:
+    except Exception: # Removed unused variable 'e'
         logger.exception("An error occurred during main execution:") # Use exception for full traceback
 
 
