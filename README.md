@@ -4,9 +4,10 @@
 
 ## Description
 
-Keywords4CV is a Python-based tool designed to help job seekers optimize their resumes and LinkedIn profiles for Applicant Tracking Systems (ATS) and human recruiters. It analyzes a collection of job descriptions and extracts the most important and relevant keywords, enabling users to tailor their application materials to specific job roles. By incorporating these keywords, users can significantly increase their chances of getting noticed by both ATS and recruiters, leading to more interview opportunities. **The script is written mainly with AIs, so it may contain mistakes**
+Keywords4CV is a Python-based tool designed to help job seekers optimize their resumes and LinkedIn profiles for Applicant Tracking Systems (ATS) and human recruiters. It analyzes a collection of job descriptions and extracts the most important and relevant keywords, enabling users to tailor their application materials to specific job roles. By incorporating these keywords, users can significantly increase their chances of getting noticed by both ATS and recruiters, leading to more interview opportunities.
 
 ## State of production
+
 **Not ready!**
 
 ## Features
@@ -25,15 +26,14 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 *   **Output:** Generates an Excel report with:
     *   **Keyword Summary:** A summary of keywords with their combined scores, job counts, and assigned categories.
     *   **Job Specific Details:** A pivot table showing the combined scores of keywords for each individual job title.
-    *   **Analysis Summary:** Statistics about the analyzed job descriptions and keywords.
 *   **Input Validation:** Includes robust input validation to handle various edge cases (e.g., non-string keys, empty descriptions, incorrect file formats).
 *   **Command-Line Interface:** Uses `argparse` for a user-friendly command-line interface.
 *   **Error Handling:** Includes comprehensive error handling and logging.
-*    **Batch Processing:** The script processes batches of texts simultaneously.
-*    **Multiprocessing:** Tokenization is executed concurrently, utilizing multiple CPU cores for substantial speed improvements.
-*    **Caching:** Preprocessing results are cached to minimize redundant computations.
+*   **Multiprocessing for Analysis:** Leverages multiprocessing to run the core analysis in a separate process, enhancing robustness and enabling timeout functionality.
+*   **Caching:** Preprocessing results are cached to minimize redundant computations.
 *   **SpaCy optimization:**  spaCy pipeline components that are not needed (parser, ner) are disabled for efficiency.
-* **NLTK resource management**: The script automatically manages required NLTK resources.
+*   **NLTK resource management**: The script automatically manages required NLTK resources.
+*   **Timeout Mechanism:** Implements a configurable timeout to prevent long-running analyses and ensure script stability, especially when processing large job description datasets or encountering unexpected issues.
 
 ## How it Works
 
@@ -59,7 +59,7 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 
 ### Prerequisites
 
-*   Python 3.7+
+*   Python 3.8+
 *   Required libraries (install via pip):
     ```bash
     pip install pandas nltk spacy scikit-learn pyyaml python-levenshtein
@@ -122,10 +122,11 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 *   `keywords4cv.py`: The main Python script.
 *   `config.yaml`:  The configuration file.
 *   `README.md`: This file.
-*   `output/`: (Created automatically) The directory for storing Excel output.
+*   `output/`: (Created automatically) The directory for storing Excel output and log files.
 *   `requirements.txt` (Optional, but highly recommended): List of required packages.  Create with `pip freeze > requirements.txt`.
 * `tests/`: Directory for unit tests (recommended, but not included in this initial version).
 * `job_descriptions.json`: Example input file.
+* `ats_optimizer.log`: Log file.
 
 ## Contributing
 
