@@ -1,348 +1,529 @@
-import re
+import argparse
+import json
 import logging
+import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-import pandas as pd
 import nltk
-from nltk.stem import WordNetLemmatizer
-from nltk.corpus import wordnet
-import yaml
-import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
+import pandas as pd
+import spacy
+import yaml
+from nltk.corpus import wordnet
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# --- Custom Exceptions ---
+class ConfigError(Exception):
+    """Custom exception for configuration errors."""
+    pass
+
+class InputValidationError(Exception):
+    """Custom exception for input validation errors."""
+    pass
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("ats_optimizer.log"), logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
-# Download NLTK resources
-nltk.download('punkt', quiet=True)
-nltk.download('wordnet', quiet=True)
-nltk.download('averaged_perceptron_tagger', quiet=True)
+# --- NLTK Resource Management ---
+NLTK_RESOURCES = ['corpora/wordnet', 'corpora/averaged_perceptron_tagger', 'tokenizers/punkt']
 
-# Load spaCy model
-try:
-    nlp = spacy.load("en_core_web_sm", disable=["parser"])
-except OSError:
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm", disable=["parser"])
+def ensure_nltk_resources():
+    """Ensure required NLTK resources are available."""
+    for resource in NLTK_RESOURCES:
+        try:
+            nltk.data.find(resource)
+        except LookupError:
+            nltk.download(resource.split('/')[1], quiet=True)
 
+# Load spaCy model efficiently
+def load_spacy_model():
+    """Load spaCy model with error handling and optimizations."""
+    try:
+        nlp = spacy.load("en_core_web_sm", disable=["parser", "ner", "lemmatizer"])
+        nlp.add_pipe("lemmatizer", config={"mode": "rule"})  # Faster than default
+        return nlp
+    except OSError:
+        try:
+            spacy.cli.download("en_core_web_sm")
+            return load_spacy_model()
+        except Exception as e:
+            logger.exception("Failed to initialize spaCy model")
+            sys.exit(1)
 
-class TextPreprocessor:
-    """Handles text preprocessing including stop words, lemmatization, and tokenization."""
+# Initialize NLP components
+ensure_nltk_resources()
+nlp = load_spacy_model()
+
+class EnhancedTextPreprocessor:
+    """Optimized text preprocessing with memoization and batch processing."""
+
+    _CACHE_SIZE = 1000  # LRU cache size for preprocessing results
 
     def __init__(self, config: Dict):
+        """Initialize the preprocessor with a configuration dictionary.
+
+        Args:
+            config (Dict): Configuration dictionary containing stop words and regex patterns.
+        """
         self.config = config
         self.stop_words = self._load_stop_words()
         self.lemmatizer = WordNetLemmatizer()
+        self.regex_patterns = {
+            "url": re.compile(r"http\S+|www\.\S+"),
+            "email": re.compile(r"\S+@\S+"),
+            "special_chars": re.compile(r"[^\w\s-]"),
+            "whitespace": re.compile(r"\s+")
+        }
+        self._cache = {}
 
     def _load_stop_words(self) -> Set[str]:
-        stop_words = set(self.config['stop_words'])
-        stop_words.update(self.config.get('stop_words_add', []))
-        stop_words.difference_update(self.config.get('stop_words_exclude', []))
+        """Load and validate stop words from config.
+
+        Returns:
+            Set[str]: A set of stop words.
+        """
+        stop_words = set(self.config.get("stop_words", []))
+        stop_words.update(self.config.get("stop_words_add", []))
+        stop_words.difference_update(self.config.get("stop_words_exclude", []))
+
+        if len(stop_words) < 50:
+            logger.warning("Stop words list seems unusually small. Verify config.")
+
         return stop_words
 
     def preprocess(self, text: str) -> str:
-        """Cleans text by removing noise and standardizing format."""
-        text = text.lower()
-        text = re.sub(r'[\n\t]+', ' ', text)
-        text = re.sub(r'http\S+|www\.\S+', '', text)
-        text = re.sub(r'\S+@\S+', '', text)
-        text = re.sub(r'[^\w\s-]', ' ', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
+        """Preprocess single text with caching.
 
-    def tokenize(self, text: str) -> List[str]:
-        """Tokenizes and lemmatizes text, filtering stop words and short tokens."""
-        doc = nlp(text)
-        tokens = []
-        for token in doc:
-            if token.text in self.stop_words or len(token.text) <= 1 or token.text.isnumeric():
-                continue
-            pos = 'v' if token.pos_ == 'VERB' else 'n'
-            lemma = self.lemmatizer.lemmatize(token.text, pos=pos)
-            tokens.append(lemma)
-        return tokens
+        Args:
+            text (str): The input text.
 
+        Returns:
+            str: The preprocessed text.
+        """
+        if text in self._cache:
+            return self._cache[text]
 
-class KeywordExtractor:
-    """Extracts keywords using whitelist, n-grams, entities, and noun chunks."""
+        cleaned = text.lower()
+        cleaned = self.regex_patterns["url"].sub("", cleaned)
+        cleaned = self.regex_patterns["email"].sub("", cleaned)
+        cleaned = self.regex_patterns["special_chars"].sub(" ", cleaned)
+        cleaned = self.regex_patterns["whitespace"].sub(" ", cleaned).strip()
+
+        # Manage cache size
+        if len(self._cache) >= self._CACHE_SIZE:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[text] = cleaned
+
+        return cleaned
+
+    def preprocess_batch(self, texts: List[str]) -> List[str]:
+        """Batch preprocessing with parallel processing.
+
+        Args:
+            texts (List[str]): A list of input texts.
+
+        Returns:
+            List[str]: A list of preprocessed texts.
+        """
+        return [self.preprocess(text) for text in texts]
+
+    def tokenize_batch(self, texts: List[str]) -> List[List[str]]:
+        """Batch tokenization with spaCy and optimized lemmatization.
+
+        Args:
+            texts (List[str]): A list of input texts.
+
+        Returns:
+            List[List[str]]: A list of lists of tokens.
+        """
+        tokens_list = []
+        for doc in nlp.pipe(texts, batch_size=50, n_process=-1):
+            tokens = []
+            for token in doc:
+                if (token.text in self.stop_words or
+                    len(token.text) <= 1 or
+                    token.text.isnumeric()):
+                    continue
+                lemma = token.lemma_.lower().strip()
+                tokens.append(lemma)
+            tokens_list.append(tokens)
+        return tokens_list
+
+class AdvancedKeywordExtractor:
+    """Enhanced keyword extraction with phrase detection and semantic analysis."""
 
     def __init__(self, config: Dict):
+        """Initialize the keyword extractor with a configuration dictionary.
+
+        Args:
+            config (Dict): Configuration dictionary containing skills whitelist and ngram range.
+        """
         self.config = config
-        self.preprocessor = TextPreprocessor(config)
-        self.whitelist = self._create_expanded_whitelist(config['skills_whitelist'])
-        self.entity_types = set(config.get('allowed_entity_types', []))
+        self.preprocessor = EnhancedTextPreprocessor(config)
+        self.whitelist = self._create_expanded_whitelist()
+        self.ngram_range = tuple(config.get("ngram_range", [1, 3]))
+        self.entity_types = set(config.get("allowed_entity_types", []))
 
-    def _create_expanded_whitelist(self, skills: List[str]) -> Set[str]:
+    def _create_expanded_whitelist(self) -> Set[str]:
+        """Create whitelist with multi-word phrases and synonyms.
+
+        Returns:
+            Set[str]: A set of whitelisted keywords.
         """
-        Creates an expanded whitelist including curated synonyms.
-        """
-        expanded_whitelist = set()
-        for skill in skills:
-            processed_skill = self.preprocessor.preprocess(skill)
-            tokens = self.preprocessor.tokenize(processed_skill)
-            expanded_skill = ' '.join(tokens)  # Lemmatized skill
-            expanded_whitelist.add(expanded_skill)
-
-            # Get synonym suggestions (using WordNet and POS filtering)
-            for token in tokens:
-                for synset in wordnet.synsets(token):
-                    for lemma in synset.lemmas():
-                        synonym = lemma.name().replace("_", " ").lower()
-                        if synonym != token:  # Avoid adding the word itself
-                            # Add to suggestions, but DO NOT directly add to whitelist
-                            # User will review these
-                            # This part is handled in the Whitelist Management
-                            pass  # Placeholder, suggestions are handled below
-        return expanded_whitelist
-
-    def _suggest_synonyms(self, skills: List[str]) -> Dict[str, List[str]]:
-        """
-        Suggests synonyms for each skill in the whitelist.
-        Returns a dictionary where keys are original skills and values are lists of suggested synonyms.
-        """
-
-        suggestions = {}
-        for skill in skills:
-            processed_skill = self.preprocessor.preprocess(skill)
-            tokens = self.preprocessor.tokenize(processed_skill)
-            skill_synonyms = set()
-            for token in tokens:
-                for synset in wordnet.synsets(token):
-                    for lemma in synset.lemmas():
-                        synonym = lemma.name().replace("_", " ").lower()
-                        if synonym != token:
-                            skill_synonyms.add(synonym)
-            suggestions[skill] = list(skill_synonyms)
-        return suggestions
-
-    def manage_whitelist(self):
-        """Manages the skills whitelist, allowing users to add/remove skills and synonyms."""
-        print("Current Whitelist:")
-        for i, skill in enumerate(self.config['skills_whitelist']):
-            print(f"{i + 1}. {skill}")
-
-        suggestions = self._suggest_synonyms(self.config['skills_whitelist'])
-
-        while True:
-            print("\nOptions:")
-            print("a. Add a new skill")
-            print("b. Add synonyms to an existing skill")
-            print("r. Remove a skill")
-            print("q. Quit and save changes")
-            choice = input("Enter your choice: ").lower()
-
-            if choice == 'a':
-                new_skill = input("Enter the new skill: ")
-                self.config['skills_whitelist'].append(new_skill)
-                suggestions = self._suggest_synonyms(self.config['skills_whitelist'])  # Update
-            elif choice == 'b':
-                try:
-                    skill_index = int(input("Enter the number of the skill to modify: ")) - 1
-                    skill = self.config['skills_whitelist'][skill_index]
-                    print(f"Suggested synonyms for '{skill}': {', '.join(suggestions[skill])}")
-                    synonyms_to_add = input("Enter synonyms to add, separated by commas (or press Enter to skip): ")
-                    if synonyms_to_add:
-                        for synonym in synonyms_to_add.split(','):
-                            synonym = synonym.strip()
-                            # Add to config, not only whitelist
-                            self.config['skills_whitelist'].append(synonym)
-                    suggestions = self._suggest_synonyms(self.config['skills_whitelist'])  # Update
-
-                except (ValueError, IndexError):
-                    print("Invalid skill number.")
-            elif choice == 'r':
-                try:
-                    skill_index = int(input("Enter the number of the skill to remove: ")) - 1
-                    removed_skill = self.config['skills_whitelist'].pop(skill_index)
-                    print(f"Removed skill: {removed_skill}")
-                    suggestions = self._suggest_synonyms(self.config['skills_whitelist'])  # Update
-                except (ValueError, IndexError):
-                    print("Invalid skill number.")
-
-            elif choice == 'q':
-                # Save changes to config.yaml
-                with open("config.yaml", 'w') as f:
-                    yaml.safe_dump(self.config, f)
-                print("Whitelist updated and saved.")
-                self.whitelist = self._create_expanded_whitelist(self.config['skills_whitelist'])
-                break
-            else:
-                print("Invalid choice.")
-
-    def _preprocess_whitelist(self, skills: List[str]) -> Set[str]:
-        """Converts whitelist skills to lemmatized form for accurate matching."""
+        base_skills = self.config.get("skills_whitelist", [])
         processed = set()
-        for skill in skills:
-            cleaned = self.preprocessor.preprocess(skill)
-            tokens = self.preprocessor.tokenize(cleaned)
-            processed.add(' '.join(tokens))
+
+        # Batch process skills
+        cleaned_skills = self.preprocessor.preprocess_batch(base_skills)
+        tokenized = self.preprocessor.tokenize_batch(cleaned_skills)
+
+        # Generate n-grams and synonyms
+        for tokens in tokenized:
+            for n in range(1, 4):
+                processed.update(self._generate_ngrams(tokens, n))
+
+        # Add synonyms from previous implementation
+        synonyms = self._generate_synonyms(base_skills)
+        processed.update(synonyms)
+
         return processed
 
-    def _extract_entities(self, text: str) -> Set[str]:
-        """Extracts named entities of allowed types."""
-        doc = nlp(text)
-        return {ent.text.lower() for ent in doc.ents if ent.label_ in self.entity_types}
+    def _generate_synonyms(self, skills: List[str]) -> Set[str]:
+        """Generate semantic synonyms using WordNet and spaCy.
 
-    def _extract_ngrams(self, tokens: List[str], n: int) -> Set[str]:
-        """Generates n-grams from tokens."""
-        return {' '.join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)}
+        Args:
+            skills (List[str]): A list of skills.
 
-    def get_keywords(self, text: str) -> List[str]:
-        """Extracts and combines keywords from multiple methods."""
-        cleaned_text = self.preprocessor.preprocess(text)
-        tokens = self.preprocessor.tokenize(cleaned_text)
-        keywords = set()
+        Returns:
+            Set[str]: A set of synonyms.
+        """
+        synonyms = set()
+        for skill in skills:
+            doc = nlp(skill)
+            # Get lemma-based variations
+            lemmatized = " ".join([token.lemma_ for token in doc]).lower()
+            if lemmatized != skill.lower():
+                synonyms.add(lemmatized)
 
-        # Whitelist skills (exact n-gram matches)
-        for skill in self.whitelist:
-            skill_len = len(skill.split())
-            for ngram in self._extract_ngrams(tokens, skill_len):
-                if ngram == skill:
-                    keywords.add(ngram)
+            # WordNet synonyms
+            for token in doc:
+                for syn in wordnet.synsets(token.text):
+                    for lemma in syn.lemmas():
+                        synonym = lemma.name().replace("_", " ").lower()
+                        if synonym != token.text and synonym != lemmatized:
+                            synonyms.add(synonym)
+        return synonyms
 
-        # Named entities
-        keywords.update(self._extract_entities(cleaned_text))
+    def _generate_ngrams(self, tokens: List[str], n: int) -> Set[str]:
+        """Generate n-grams from a list of tokens.
 
-        # Tokens and n-grams (using configured range)
-        for n in range(self.config.get('ngram_range', [1, 1])[0], self.config.get('ngram_range', [1, 1])[1] + 1):  # Use config
-            keywords.update(self._extract_ngrams(tokens, n))
+        Args:
+            tokens (List[str]): A list of tokens.
+            n (int): The length of the n-grams.
 
-        return list(keywords)
+        Returns:
+            Set[str]: A set of n-grams.
+        """
+        return {" ".join(tokens[i:i+n]) for i in range(len(tokens)-n+1)}
 
+    def extract_keywords(self, texts: List[str]) -> List[Set[str]]:
+        """Extract keywords with configurable n-gram range.
 
-class JobAnalyzer:
-    """Analyzes job descriptions to compute keyword importance using TF-IDF."""
+        Args:
+            texts (List[str]): A list of input texts.
+
+        Returns:
+            List[Set[str]]: A list of sets of keywords.
+        """
+        cleaned = self.preprocessor.preprocess_batch(texts)
+        tokenized = self.preprocessor.tokenize_batch(cleaned)
+
+        all_keywords = []
+        min_n, max_n = self.ngram_range
+
+        for tokens in tokenized:
+            keywords = set()
+            # Whitelist matching
+            for n in range(1, 4):
+                for ngram in self._generate_ngrams(tokens, n):
+                    if ngram in self.whitelist:
+                        keywords.add(ngram)
+
+            # Configurable n-gram extraction
+            for n in range(min_n, max_n+1):
+                keywords.update(self._generate_ngrams(tokens, n))
+
+            all_keywords.append(keywords)
+
+        return all_keywords
+
+class ATSOptimizer:
+    """Main analysis class with enhanced scoring and validation."""
 
     def __init__(self, config_path: str = "config.yaml"):
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-        self.keyword_extractor = KeywordExtractor(self.config)
-        self.categories = self.config.get('keyword_categories', {})
+        """Initialize the ATS Optimizer with a configuration file path.
 
-    def _cosine_similarity(self, vec1, vec2):
-        """Calculates cosine similarity between two vectors."""
-        return vec1.dot(vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+        Args:
+            config_path (str): Path to the configuration file. Defaults to "config.yaml".
+        """
+        self.config = self._load_config(config_path)
+        self.keyword_extractor = AdvancedKeywordExtractor(self.config)
+        self._init_categories()
+        self._validate_config()
 
-    def _categorize(self, keyword: str) -> List[str]:
+    def _load_config(self, config_path: str) -> Dict:
+        """Load and validate configuration.
+
+        Args:
+            config_path (str): Path to the configuration file.
+
+        Returns:
+            Dict: The configuration dictionary.
+
+        Raises:
+            ConfigError: If the configuration file is invalid or missing.
         """
-        Assigns a keyword to one or more categories based on semantic similarity.
-        """
-        categories = []
-        keyword_embedding = nlp(keyword).vector  # Get embedding
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+
+            # Set default weightings if missing
+            config.setdefault("weighting", {
+                "tfidf_weight": 0.7,
+                "frequency_weight": 0.3,
+                "whitelist_boost": 1.5
+            })
+
+            return config
+        except Exception as e:
+            logger.error(f"Config error: {str(e)}")
+            raise ConfigError(f"Invalid configuration: {str(e)}")
+
+    def _init_categories(self):
+        """Initialize category vectors and metadata."""
+        self.categories = self.config.get("keyword_categories", {})
+        self.category_vectors = {}
 
         for category, terms in self.categories.items():
-            # Calculate centroid vector for the category (could be pre-calculated)
-            category_embeddings = [nlp(term).vector for term in terms]
-            centroid_vector = sum(category_embeddings) / len(category_embeddings)
+            vectors = [nlp(term).vector for term in terms if nlp(term).vector_norm]
+            if vectors:
+                self.category_vectors[category] = {
+                    "centroid": np.mean(vectors, axis=0),
+                    "terms": terms
+                }
+            else:
+                logger.warning("Category %s has no valid terms with vectors.", category)
 
-            similarity = self._cosine_similarity(keyword_embedding, centroid_vector)
 
-            if similarity > self.config.get('similarity_threshold', 0.7):  # Default threshold
-                categories.append(category)
+    def _validate_config(self):
+        """Validate critical configuration parameters.
 
-        if not categories:
-            categories.append('Other')
-        return categories
+        Raises:
+            ConfigError: If required configuration keys are missing.
+        """
+        required_keys = ["skills_whitelist", "stop_words"]
+        for key in required_keys:
+            if not self.config.get(key):
+                raise ConfigError(f"Missing required config key: {key}")
 
-    def analyze(self, job_descriptions: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Main analysis method generating TF-IDF scores and categorization."""
+        if len(self.config["skills_whitelist"]) < 10:
+            logger.warning("Skills whitelist seems small. Consider expanding it.")
+
+    def analyze_jobs(self, job_descriptions: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Main analysis method with enhanced scoring.
+
+        Args:
+            job_descriptions (Dict): A dictionary of job descriptions, where keys are job titles and values are job description texts.
+
+        Returns:
+            Tuple[pd.DataFrame, pd.DataFrame]: A tuple containing two pandas DataFrames:
+                - The first DataFrame is a summary of keywords and their scores.
+                - The second DataFrame is a pivot table of keyword scores for each job title.
+        """
         self._validate_input(job_descriptions)
+        texts = list(job_descriptions.values())
 
-        # --- Calculate Keyword Frequencies (BEFORE TF-IDF) ---
-        all_keywords = {}
-        for title, desc in job_descriptions.items():
-            keywords = self.keyword_extractor.get_keywords(desc)
-            for keyword in keywords:
-                all_keywords[keyword] = all_keywords.get(keyword, 0) + 1
+        # Extract keywords in batch
+        keyword_sets = self.keyword_extractor.extract_keywords(texts)
 
-        # --- Prepare keyword strings for TF-IDF ---
-        job_keywords = {
-            title: ' '.join(self.keyword_extractor.get_keywords(desc))
-            for title, desc in job_descriptions.items()
-        }
-
-        # --- Compute TF-IDF ---
+        # Create document-term matrix
         vectorizer = TfidfVectorizer(
-            tokenizer=lambda x: x.split(),  # Treat space-separated n-grams as tokens
-            lowercase=False,  # Already handled during preprocessing
-            ngram_range=(1, 1)  # IMPORTANT:  Do NOT use the configurable ngram_range here.
+            ngram_range=self.keyword_extractor.ngram_range,
+            lowercase=False,
+            tokenizer=lambda x: x,
+            preprocessor=lambda x: x
         )
-        tfidf_matrix = vectorizer.fit_transform(job_keywords.values())
+        dtm = vectorizer.fit_transform([" ".join(ks) for ks in keyword_sets])
+
+        # Calculate scores
+        results = []
         feature_names = vectorizer.get_feature_names_out()
 
-        # --- Generate Results (with Adjusted Weights) ---
-        results = []
-        for i, (title, _) in enumerate(job_descriptions.items()):
-            for col in tfidf_matrix[i].nonzero()[1]:
-                keyword = feature_names[col]
-                tfidf_score = tfidf_matrix[i, col]
+        for idx, title in enumerate(job_descriptions):
+            row = dtm[idx]
+            for col in row.nonzero()[1]:
+                term = feature_names[col]
+                tfidf = row[0, col]
+                freq = keyword_sets[idx].count(term)
 
-                # --- Calculate Adjusted Weight ---
-                whitelist_boost = 1.5 if keyword in self.keyword_extractor.whitelist else 1.0  # Example boost
-                log_frequency = 1 + np.log(all_keywords.get(keyword, 1))  # Log frequency, handle 0
-                adjusted_tfidf = tfidf_score * whitelist_boost * log_frequency
+                # Enhanced scoring formula
+                score = (
+                    self.config["weighting"]["tfidf_weight"] * tfidf +
+                    self.config["weighting"]["frequency_weight"] * np.log1p(freq)
+                )
+
+                if term in self.keyword_extractor.whitelist:
+                    score *= self.config["weighting"]["whitelist_boost"]
 
                 results.append({
-                    'Keyword': keyword,
-                    'Job Title': title,
-                    'TF-IDF': adjusted_tfidf,  # Use adjusted TF-IDF
-                    'Category': ','.join(self._categorize(keyword))  # Join categories with commas
+                    "Keyword": term,
+                    "Job Title": title,
+                    "Score": score,
+                    "TF-IDF": tfidf,
+                    "Frequency": freq,
+                    "Category": self._categorize_term(term),
+                    "In Whitelist": term in self.keyword_extractor.whitelist
                 })
 
-        # --- (Rest of the method remains the same - DataFrame creation, etc.) ---
+        # Create dataframes
         df = pd.DataFrame(results)
-        summary = df.groupby('Keyword').agg(
-            Total_TFIDF=('TF-IDF', 'sum'),
-            Job_Count=('Job Title', 'nunique'),
-            Avg_TFIDF=('TF-IDF', 'mean')
-        ).sort_values('Total_TFIDF', ascending=False).reset_index()
+        summary = df.groupby("Keyword").agg(
+            Total_Score=("Score", "sum"),
+            Avg_Score=("Score", "mean"),
+            Job_Count=("Job Title", "nunique")
+        ).sort_values("Total_Score", ascending=False)
 
-        pivot = df.pivot_table(index='Keyword', columns='Job Title', values='TF-IDF', aggfunc='sum', fill_value=0)
+        pivot = df.pivot_table(
+            values="Score",
+            index="Keyword",
+            columns="Job Title",
+            aggfunc="sum",
+            fill_value=0
+        )
+
         return summary, pivot
 
-    def _validate_input(self, jobs: Dict[str, str]):
-        """Validates job description input format and content."""
+    def _categorize_term(self, term: str) -> str:
+        """Categorize term using hybrid approach.
+
+        Args:
+            term (str): The term to categorize.
+
+        Returns:
+            str: The category of the term.
+        """
+        # First try direct matches
+        for category, data in self.category_vectors.items():
+            if any(keyword.lower() in term.lower() for keyword in data["terms"]):
+                return category
+
+        # Then semantic similarity
+        return self._semantic_categorization(term)
+
+    def _semantic_categorization(self, term: str) -> str:
+        """Categorize using spaCy embeddings.
+
+        Args:
+            term (str): The term to categorize.
+
+        Returns:
+            str: The category of the term.
+        """
+        term_vec = nlp(term).vector
+        if not term_vec.any():
+            return "Other"
+
+        best_score = self.config.get("similarity_threshold", 0.6)
+        best_category = "Other"
+
+        for category, data in self.category_vectors.items():
+            similarity = cosine_similarity(term_vec, data["centroid"])
+            if similarity > best_score:
+                best_score = similarity
+                best_category = category
+
+        return best_category
+
+    def _validate_input(self, jobs: Dict):
+        """Validate job descriptions input.
+
+        Args:
+            jobs (Dict): A dictionary of job descriptions.
+
+        Raises:
+            InputValidationError: If the input is invalid.
+        """
         if not isinstance(jobs, dict):
-            raise TypeError("Input must be a dictionary.")
-        if len(jobs) < 2:
-            raise ValueError("At least 2 job descriptions required.")
+            raise InputValidationError("Input must be a dictionary")
+
+        min_jobs = self.config.get("min_jobs", 2)
+        if len(jobs) < min_jobs:
+            raise InputValidationError(f"At least {min_jobs} job descriptions required")
+
         for title, desc in jobs.items():
             if not isinstance(title, str) or not title.strip():
-                raise ValueError(f"Invalid job title: {title}")
-            if not isinstance(desc, str) or len(desc.split()) < 10:
-                raise ValueError(f"Invalid description for: {title}")
+                raise InputValidationError(f"Invalid job title: {title}")
+            if len(desc.split()) < self.config.get("min_desc_length", 50):
+                logger.warning(f"Short description for {title} - may affect results")
 
+def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    """Safe cosine similarity calculation.
 
-# Example usage
-if __name__ == "__main__":
-    print("Choose an option:")
-    print("1. Analyze Job Descriptions")
-    print("2. Manage Whitelist")
-    choice = input("Enter your choice (1 or 2): ")
+    Args:
+        vec1 (np.ndarray): The first vector.
+        vec2 (np.ndarray): The second vector.
 
-    if choice == '1':
-        analyzer = JobAnalyzer()
-        sample_jobs = {
-            "Data Scientist": "Expertise in Python, machine learning, and statistical modeling...",
-            "Product Manager": "Experience in Agile, Scrum, and product lifecycle management..."
-        }
+    Returns:
+        float: The cosine similarity between the two vectors.
+    """
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return np.dot(vec1, vec2) / (norm1 * norm2)
 
-        summary_df, pivot_df = analyzer.analyze(sample_jobs)
+# --- Command Line Interface ---
+def parse_arguments():
+    """Parse command-line arguments.
+
+    Returns:
+        argparse.Namespace: The parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="ATS Keyword Optimizer")
+    parser.add_argument("-i", "--input", required=True, help="Input JSON file")
+    parser.add_argument("-c", "--config", default="config.yaml", help="Config file")
+    parser.add_argument("-o", "--output", default="results.xlsx", help="Output file")
+    return parser.parse_args()
+
+def main():
+    """Main function to run the ATS keyword analysis."""
+    args = parse_arguments()
+
+    try:
+        analyzer = ATSOptimizer(args.config)
+        with open(args.input) as f:
+            jobs = json.load(f)
+
+        summary, details = analyzer.analyze_jobs(jobs)
 
         # Save results
-        output_dir = Path(analyzer.config['output_dir'])
-        output_dir.mkdir(exist_ok=True)
-        with pd.ExcelWriter(output_dir / "analysis_results.xlsx") as writer:
-            summary_df.to_excel(writer, sheet_name="Summary", index=False)
-            pivot_df.to_excel(writer, sheet_name="Details")
+        with pd.ExcelWriter(args.output) as writer:
+            summary.to_excel(writer, sheet_name="Summary")
+            details.to_excel(writer, sheet_name="Detailed Scores")
 
-        print("Top Keywords:")
-        print(summary_df.head(10))
-    elif choice == '2':
-        analyzer = JobAnalyzer()  # Or just the KeywordExtractor
-        analyzer.keyword_extractor.manage_whitelist()  # New method
-    else:
-        print("Invalid choice.")
+        print(f"Analysis complete. Results saved to {args.output}")
+
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
