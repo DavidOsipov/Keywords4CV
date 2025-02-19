@@ -1,0 +1,654 @@
+# config.yaml
+stop_words:
+  - a
+  - about
+  - above
+  - after
+  - again
+  - against
+  - all
+  - am
+  - an
+  - and
+  - any
+  - are
+  - as
+  - at
+  - be
+  - because
+  - been
+  - before
+  - being
+  - below
+  - between
+  - both
+  - but
+  - by
+  - can
+  - did
+  - do
+  - does
+  - doing
+  - down
+  - during
+  - each
+  - few
+  - for
+  - from
+  - further
+  - had
+  - has
+  - have
+  - having
+  - he
+  - her
+  - here
+  - hers
+  - herself
+  - him
+  - himself
+  - his
+  - how
+  - i
+  - if
+  - in
+  - into
+  - is
+  - it
+  - its
+  - itself
+  - just
+  - me
+  - more
+  - most
+  - my
+  - myself
+  - no
+  - nor
+  - not
+  - now
+  - of
+  - off
+  - on
+  - once
+  - only
+  - or
+  - other
+  - our
+  - ours
+  - ourselves
+  - out
+  - over
+  - own
+  - per
+  - s
+  - same
+  - she
+  - should
+  - so
+  - some
+  - such
+  - t
+  - than
+  - that
+  - the
+  - their
+  - theirs
+  - them
+  - themselves
+  - then
+  - there
+  - these
+  - they
+  - this
+  - those
+  - through
+  - to
+  - too
+  - under
+  - until
+  - up
+  - very
+  - was
+  - we
+  - were
+  - what
+  - when
+  - where
+  - which
+  - while
+  - who
+  - whom
+  - why
+  - will
+  - with
+  - you
+  - your
+  - yours
+  - yourself
+  - yourselves
+  - job
+  - description
+  - role
+  - required
+  - responsibilities
+  - work
+  - experience
+  - skills
+  - qualifications
+  - summary
+  - benefits
+  - company
+  - team
+  - opportunity
+  - candidate
+  - apply
+  - application
+  - position
+  - looking
+  - join
+  - across
+  - within
+  - ensure
+  - must
+  - able
+  - based
+  - well
+  - working
+  - strong
+  - excellent
+  - proven
+  - including
+  - related
+  - various
+  - using
+  - help
+  - new
+  - day
+  - week
+  - month
+  - year
+  - level
+  - senior
+  - junior
+  - associate
+  - manager
+  - support
+  - assist
+  - perform
+  - participate
+  - contribute
+  - knowledge
+  - understanding
+  - ability
+  - good
+  - great
+  - better
+  - best
+  - main
+  - key
+  - essential
+  - primary
+  - typically
+  - task
+  - duty
+  - goal
+  - objective
+  - purpose
+  - background
+  - overview
+  - detail
+  - information
+  - regard
+  - respect
+  - different
+  - multiple
+  - several
+  - certain
+  - specific
+  - particular
+  - given
+  - provided
+  - offer
+  - seeking
+  - hire
+  - need
+  - want
+  - desire
+  - passion
+  - eager
+  - ready
+  - excited
+  - comfortable
+  - familiar
+  - proficient
+  - adept
+  - expert
+  - master
+  - highly
+  - effectively
+  - efficiently
+  - quickly
+  - accurately
+  - closely
+  - directly
+  - indirectly
+  - often
+  - sometimes
+  - usually
+  - generally
+  - normally
+  - regularly
+  - currently
+  - recently
+  - future
+  - past
+  - present
+  - ongoing
+  - upcoming
+  - previous
+  - first
+  - second
+  - third
+  - next
+  - last
+  - another
+  - every
+  - each
+  - some
+  - any
+  - all
+  - both
+  - few
+  - many
+  - much
+  - several
+  - various
+  - certain
+  - particular
+  - specific
+  - general
+  - overall
+  - total
+  - whole
+  - part
+  - section
+  - aspect
+  - area
+  - field
+  - domain
+  - sector
+  - industry
+  - market
+  - customer
+  - client
+  - user
+  - partner
+  - vendor
+  - stakeholder
+  - internal
+  - external
+  - global
+  - local
+  - national
+  - international
+  - organization
+  - structure
+  - process
+  - system
+  - tool
+  - platform
+  - technology
+  - methodology
+  - approach
+  - technique
+  - practice
+  - standard
+  - guideline
+  - procedure
+  - protocol
+  - policy
+  - regulation
+  - compliance
+  - requirement
+  - condition
+  - term
+  - factor
+  - element
+  - component
+  - issue
+  - problem
+  - challenge
+  - solution
+  - result
+  - outcome
+  - output
+  - input
+  - data
+  - information
+  - report
+  - document
+  - presentation
+  - interaction
+  - collaboration
+  - meeting
+  - discussion
+  - training
+  - learning
+  - growth
+  - development
+  - improvement
+  - innovation
+  - change
+  - transformation
+  - lead
+  - manage
+  - own
+  - responsible
+  - accountable
+  - effective
+  - efficient
+  - accurate
+  - clear
+  - concise
+  - comprehensive
+  - detailed
+  - thorough
+  - regards
+  - thanks
+  - please
+  - hello
+  - hi
+  - regard
+  - best
+  - greetings
+  - bi
+
+skills_whitelist:
+  - python
+  - sql
+  - java
+  - javascript
+  - typescript
+  - react
+  - angular
+  - vue
+  - node.js
+  - node
+  - aws
+  - azure
+  - gcp
+  - google cloud platform
+  - amazon web services
+  - microsoft azure
+  - docker
+  - kubernetes
+  - excel
+  - powerpoint
+  - tableau
+  - power bi
+  - tensorflow
+  - pytorch
+  - keras
+  - scikit-learn
+  - pandas
+  - numpy
+  - matplotlib
+  - seaborn
+  - git
+  - github
+  - gitlab
+  - bitbucket
+  - jira
+  - confluence
+  - slack
+  - agile
+  - scrum
+  - kanban
+  - devops
+  - ci/cd
+  - continuous integration
+  - continuous delivery
+  - continuous deployment
+  - ml
+  - ai
+  - machine learning
+  - artificial intelligence
+  - nlp
+  - natural language processing
+  - api
+  - rest
+  - restful api
+  - graphql
+  - mongodb
+  - postgresql
+  - mysql
+  - redis
+  - elasticsearch
+  - data analysis
+  - data analytics
+  - data visualization
+  - data warehousing
+  - data mining
+  - database management
+  - product management
+  - product development
+  - deep learning
+  - communication
+  - negotiation
+  - problem-solving
+  - time management
+  - leadership
+  - teamwork
+  - critical thinking
+  - adaptability
+  - project management
+  - business analysis
+  - strategy
+  - strategic planning
+  - product strategy
+  - roadmapping
+  - product roadmap
+  - market research
+  - competitive analysis
+  - user research
+  - customer research
+  - user stories
+  - backlog management
+  - prioritization
+  - go-to-market
+  - go-to-market strategy
+  - product lifecycle
+  - product lifecycle management
+  - plm
+  - saas
+  - software as a service
+  - ux
+  - user experience
+  - ui
+  - user interface
+  - wireframing
+  - prototyping
+  - a/b testing
+  - mvp
+  - minimum viable product
+  - product analytics
+  - web analytics
+  - google analytics
+  - adobe analytics
+  - stakeholder management
+  - presentation skills
+  - requirements elicitation
+  - requirements analysis
+  - requirements gathering
+  - requirements management
+  - process modeling
+  - process improvement
+  - business process modeling
+  - uml
+  - unified modeling language
+  - bpmn
+  - business process model and notation
+  - use cases
+  - user acceptance testing
+  - uat
+  - testing
+  - software testing
+  - quality assurance
+  - qa
+  - data modeling
+  - business process reengineering
+  - bpr
+  - documentation
+  - technical writing
+  - risk management
+  - budget management
+  - resource management
+  - scope management
+  - project planning
+  - project execution
+  - project monitoring
+  - project control
+  - waterfall
+  - prince2
+  - pmp
+  - project management professional
+  - gantt charts
+  - gantt chart
+  - critical path
+  - critical path method
+  - cpm
+  - communication planning
+  - change management
+  - issue tracking
+  - issue resolution
+  - conflict resolution
+  - agile methodologies
+  - scrum master
+  - certified scrum master
+  - csm
+  - product owner
+  - certified product owner
+  - cspo
+  - sprint planning
+  - sprint review
+  - sprint retrospective
+  - daily scrum
+  - daily standup
+  - iterative development
+  - incremental development
+  - sprint
+  - sprint backlog
+  - backlog grooming
+  - definition of done
+  - planning poker
+  - retrospective
+  - scope creep
+  - standup
+  - story point
+  - lean software development
+  - lsd
+  - customer journey mapping
+  - empathy mapping
+  - design thinking
+  - lean startup
+  - user persona
+  - product marketing manager
+  - product operations
+  - acceptance criteria
+  - feature factory
+  - feature-less roadmap
+  - general availability
+  - ga
+  - implicit requirements
+  - intuitive design
+  - mockup
+  - pivot
+  - sunk cost
+  - swot analysis
+  - technical debt
+  - turnover rate
+  - unique selling proposition
+  - usp
+  - usability testing
+  - use case
+  - value proposition
+  - vanity metrics
+  - weighted scoring
+  - wireframe
+  - program manager
+  - technical product manager
+  - alpha test
+  - beta test
+  - digital transformation
+  - end-user era
+
+stop_words_add: []
+stop_words_exclude: []
+
+output_dir: output
+
+keyword_categories:
+    Technical Skills:
+      - python
+      - sql
+      - java
+      - javascript
+      - typescript
+      - react
+      - angular
+      - vue
+      - node
+      - aws
+      - azure
+      - gcp
+      - docker
+      - kubernetes
+      - excel
+      - powerpoint
+      - tableau
+      - power bi
+      - tensorflow
+      - pytorch
+      - keras
+      - scikit-learn
+      - pandas
+      - numpy
+      - matplotlib
+      - seaborn
+      - git
+      - jira
+      - confluence
+      - slack
+      - mongodb
+      - postgresql
+      - mysql
+      - redis
+      - elasticsearch
+      - data analysis
+      - ml
+      - ai
+      - machine learning
+      - deep learning
+      - natural language processing
+      - nlp
+      - api
+      - rest
+      - graphql
+      - ci/cd
+    Soft Skills:
+      - communication
+      - negotiation
+      - problem-solving
+      - time management
+      - leadership
+      - teamwork
+      - critical thinking
+      - adaptability
+      - presentation skills
+    Industry Knowledge:
+      - project management
+      - business analysis
+      - product management
+      - devops
+    Other: []
