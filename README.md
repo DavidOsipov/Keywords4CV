@@ -4,7 +4,10 @@
 
 ## Description
 
-Keywords4CV is a Python-based tool designed to help job seekers optimize their resumes and LinkedIn profiles for Applicant Tracking Systems (ATS) and human recruiters. It analyzes a collection of job descriptions and extracts the most important and relevant keywords, enabling users to tailor their application materials to specific job roles. By incorporating these keywords, users can significantly increase their chances of getting noticed by both ATS and recruiters, leading to more interview opportunities.
+Keywords4CV is a Python-based tool designed to help job seekers optimize their resumes and LinkedIn profiles for Applicant Tracking Systems (ATS) and human recruiters. It analyzes a collection of job descriptions and extracts the most important and relevant keywords, enabling users to tailor their application materials to specific job roles. By incorporating these keywords, users can significantly increase their chances of getting noticed by both ATS and recruiters, leading to more interview opportunities. **The script is written mainly with AIs, so it may contain mistakes**
+
+## State of production
+**Not ready!**
 
 ## Features
 
@@ -70,7 +73,7 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/your-username/Keywords4Cv.git  # Replace your-username
+    git clone https://github.com/DavidOsipov/Keywords4Cv.git
     cd Keywords4Cv
     ```
 2.  (Optional but recommended) Create and activate a virtual environment:
