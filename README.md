@@ -8,45 +8,48 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 
 ## Features
 
-*   **Keyword Extraction:** Identifies key skills, qualifications, terminology, and named entities from job descriptions using NLP techniques (spaCy, NLTK, scikit-learn).
-*   **TF-IDF Analysis:** Computes Term Frequency-Inverse Document Frequency (TF-IDF) scores, combined with *whitelist boosting* and *overall keyword frequency*, to determine the importance of keywords across multiple job descriptions.
-*   **Curated Synonym Handling:**  Includes a *curated* synonym handling feature. The script allows users to manage a whitelist of skills and their synonyms via a "Whitelist Management Mode". This helps capture relevant keyword variations.
-*   **Named Entity Recognition (NER):** Extracts relevant named entities (organizations, products, etc.) using spaCy to capture important industry-specific terms.
-*   **Multi-Label Keyword Categorization:**  Categorizes extracted keywords into user-defined categories (e.g., "Technical Skills," "Soft Skills," "Industry Knowledge") using *semantic similarity* (word embeddings and cosine similarity). Keywords can belong to *multiple* categories.
+*   **Keyword Extraction:** Identifies key skills, qualifications, and terminology from job descriptions using NLP techniques (spaCy, NLTK, scikit-learn).
+*   **TF-IDF Analysis:** Computes Term Frequency-Inverse Document Frequency (TF-IDF) scores, combined with *whitelist boosting* and *keyword frequency*, to determine the importance of keywords across multiple job descriptions.
+*   **Synonym Suggestion:** Includes a synonym suggestion feature to help expand the keyword coverage.
 *   **Configurable:** Uses a `config.yaml` file for easy customization of:
     *   Stop words (with options to add and exclude specific words).
-    *   Skills whitelist (with synonym management).
-    *   Allowed entity types for NER.
+    *   Skills whitelist.
     *   Keyword categories and their associated terms.
     *   Output directory.
     *   N-gram range for keyword extraction.
     *   Similarity threshold for categorization.
-*   **Output:** Generates two Excel reports:
-    *   **Keyword Summary:** A summary of keywords with their *adjusted* TF-IDF scores (incorporating whitelist boost and frequency), job counts, and assigned categories.
-    *   **Job Specific Details:** A pivot table showing the adjusted TF-IDF scores of keywords for each individual job title.
-*   **Input Validation:** Includes robust input validation to handle various edge cases (e.g., non-string keys, empty descriptions).
-*   **Whitelist Management Mode:** Provides a user-friendly way to manage the skills whitelist directly from the script, allowing users to add/remove skills and add/review curated synonyms.
+    *   Weighting for TF-IDF, frequency, and whitelist boost.
+*   **Output:** Generates an Excel report with:
+    *   **Keyword Summary:** A summary of keywords with their combined scores, job counts, and assigned categories.
+    *   **Job Specific Details:** A pivot table showing the combined scores of keywords for each individual job title.
+    *   **Analysis Summary:** Statistics about the analyzed job descriptions and keywords.
+*   **Input Validation:** Includes robust input validation to handle various edge cases (e.g., non-string keys, empty descriptions, incorrect file formats).
+*   **Command-Line Interface:** Uses `argparse` for a user-friendly command-line interface.
+*   **Error Handling:** Includes comprehensive error handling and logging.
+*    **Batch Processing:** The script processes batches of texts simultaneously.
+*    **Multiprocessing:** Tokenization is executed concurrently, utilizing multiple CPU cores for substantial speed improvements.
+*    **Caching:** Preprocessing results are cached to minimize redundant computations.
+*   **SpaCy optimization:**  spaCy pipeline components that are not needed (parser, ner) are disabled for efficiency.
+* **NLTK resource management**: The script automatically manages required NLTK resources.
 
 ## How it Works
 
-1.  **Input:** The script takes a Python dictionary as input:
+1.  **Input:** The script takes a JSON file as input via the command line:
     *   **Keys:** Job titles (strings).
     *   **Values:** Full text of the corresponding job descriptions (strings).
-2.  **Preprocessing:** The text is cleaned (lowercase, punctuation removal) and tokenized/lemmatized using spaCy and NLTK.
+2.  **Preprocessing:** The text is cleaned (lowercase, URL/email/special character removal) and tokenized/lemmatized using spaCy and NLTK. A cache is used for efficiency.
 3.  **Keyword Extraction:**
-    *   **Whitelist Matching:**  Identifies exact phrase matches for skills (and their curated synonyms) in the expanded whitelist.
+    *   **Whitelist Matching:**  Identifies exact phrase matches for skills in the whitelist.
     *   **N-gram Generation:** Generates n-grams (multi-word phrases) based on the configured `ngram_range`.
-    *   **Named Entity Recognition:** Extracts relevant named entities.
     *   **Tokenization and Lemmatization:** Processes the text into individual tokens and reduces words to their base form (lemmas).
 4.  **Keyword Weighting:**
     *   Calculates TF-IDF scores using scikit-learn's `TfidfVectorizer`.
-    *   Applies a *whitelist boost* to keywords found in the (expanded) whitelist.
-    *   Factors in the *overall frequency* of each keyword across all job descriptions.
-    *   Combines these factors to produce an *adjusted* TF-IDF score.
+    *   Applies a *whitelist boost* to keywords found in the whitelist.
+    *   Factors in the *frequency* of each keyword.
+    *   Combines these factors using configurable weights.
 5.  **Keyword Categorization:**
-    *   Calculates the semantic similarity between each keyword and user-defined categories using word embeddings.
+    *   Calculates the semantic similarity between each keyword and user-defined categories using word embeddings and cosine similarity.
     *   Assigns keywords to categories based on a similarity threshold (configurable in `config.yaml`).
-    *   Allows for *multi-label categorization* (a keyword can belong to multiple categories).
 6.  **Output Generation:** Creates pandas DataFrames and saves them to an Excel file.
 
 ## Getting Started
@@ -56,13 +59,12 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 *   Python 3.7+
 *   Required libraries (install via pip):
     ```bash
-    pip install pandas nltk spacy scikit-learn pyyaml openpyxl numpy
+    pip install pandas nltk spacy scikit-learn pyyaml python-levenshtein
     ```
 *   Download the spaCy English language model:
     ```bash
     python -m spacy download en_core_web_sm
     ```
-*   NLTK resources: The script will automatically download necessary NLTK resources (punkt, wordnet, averaged_perceptron_tagger) on its first run.
 
 ### Installation
 
@@ -81,46 +83,46 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 
 ### Usage
 
-1.  **Prepare your job descriptions:** Create a Python dictionary containing your job descriptions.  Example:
+1.  **Prepare your job descriptions:** Create a JSON file (e.g., `job_descriptions.json`) containing your job descriptions.  Example:
 
-    ```python
-    job_descriptions = {
-        "Data Scientist": "People deserve more from their money... (full job description)",
-        "Product Manager - SaaS": "We are seeking a hands-on Product Manager... (full job description)",
-        # ... more job descriptions ...
+    ```json
+    {
+      "Data Scientist": "We are looking for a data scientist with experience in Python, machine learning, and SQL...",
+      "Product Manager": "The ideal candidate will have experience with Agile methodologies, product roadmapping, and user research...",
+      "Software Engineer": "Seeking a software engineer proficient in Java, Spring, and REST APIs..."
     }
     ```
 
 2.  **Customize `config.yaml`:**  Modify the `config.yaml` file to adjust:
     *   `stop_words`, `stop_words_add`, `stop_words_exclude`: Fine-tune the stop word list.
-    *   `skills_whitelist`:  Add initial skills and technologies relevant to your target roles.  *This is crucial for good results.* You'll manage synonyms via the script's "Whitelist Management Mode."
-    *   `allowed_entity_types`: Select which named entity types to extract.
+    *   `skills_whitelist`:  Add skills and technologies relevant to your target roles.
     *   `keyword_categories`: Define categories and associated terms for grouping keywords.
     *   `output_dir`:  Specify the output directory.
     *   `ngram_range`:  Set the desired n-gram range (e.g., `[1, 3]` for unigrams, bigrams, and trigrams).
     *   `similarity_threshold`:  Adjust the threshold for category assignment.
+    *   `weighting`: Configure the weights for TF-IDF, frequency, and whitelist boost.
+    *   `min_desc_length`: Set minimum description length.
+    *    `min_jobs`: Set minimum number of job descriptions.
+3.  **Run the script:**
 
-3.  **Run the script:** Execute the `main.py` script.  The script will present a menu:
-
+    ```bash
+    python keywords4cv.py -i job_descriptions.json -c config.yaml -o results.xlsx
     ```
-    Choose an option:
-    1. Analyze Job Descriptions
-    2. Manage Whitelist
-    Enter your choice (1 or 2):
-    ```
+   * `-i` or `--input`:  Path to the input JSON file (required).
+   * `-c` or `--config`: Path to the configuration file (optional, defaults to `config.yaml`).
+   * `-o` or `--output`: Path to the output Excel file (optional, defaults to `results.xlsx`).
 
-    *   **Option 1 (Analyze Job Descriptions):**  Performs the keyword analysis and saves the results to an Excel file.
-    *   **Option 2 (Manage Whitelist):**  Enters the "Whitelist Management Mode," allowing you to add/remove skills, add suggested synonyms, and save the changes to `config.yaml`.  It is recommended to run this *before* analyzing job descriptions to customize the whitelist.
-
-4.  **Review the output:** The Excel file (e.g., `analysis_results.xlsx`) will be saved in the specified `output_dir`.
+4.  **Review the output:** The Excel file (e.g., `results.xlsx`) will be saved in the specified `output_dir`.
 
 ## Repository Structure
 
-*   `main.py`: The main Python script.
+*   `keywords4cv.py`: The main Python script.
 *   `config.yaml`:  The configuration file.
 *   `README.md`: This file.
 *   `output/`: (Created automatically) The directory for storing Excel output.
 *   `requirements.txt` (Optional, but highly recommended): List of required packages.  Create with `pip freeze > requirements.txt`.
+* `tests/`: Directory for unit tests (recommended, but not included in this initial version).
+* `job_descriptions.json`: Example input file.
 
 ## Contributing
 
