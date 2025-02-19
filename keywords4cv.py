@@ -6,61 +6,56 @@ from typing import Dict, List, Set, Tuple
 
 import pandas as pd
 import nltk
-from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
-from nltk.corpus import wordnet
-import yaml  # For configuration file
-import spacy  # For NER and improved lemmatization
-from sklearn.feature_extraction.text import TfidfVectorizer  # For TF-IDF
+import yaml
+import spacy
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Load spaCy Model (outside classes for efficiency) ---
+# --- Download NLTK Resources ---
+def download_nltk_resources():
+    """Downloads necessary NLTK resources."""
+    for resource in ['punkt', 'wordnet', 'averaged_perceptron_tagger']:
+        try:
+            nltk.data.find(f'tokenizers/{resource}' if resource == 'punkt' else f'corpora/{resource}' if resource == 'wordnet' else f'taggers/{resource}')
+        except LookupError:
+            logging.info(f"Downloading NLTK resource: {resource}")
+            nltk.download(resource, quiet=True)
+
+download_nltk_resources()  # Call the download function at the start
+
+# --- Load spaCy Model ---
 try:
-    nlp = spacy.load("en_core_web_sm", disable=["parser"])  # Disable parser
+    nlp = spacy.load("en_core_web_sm", disable=["parser"])  # Disable parser for speed
 except OSError:
-    print("Downloading en_core_web_sm model...")
+    logger.warning("Downloading en_core_web_sm model...")
     spacy.cli.download("en_core_web_sm")
     nlp = spacy.load("en_core_web_sm", disable=["parser"])
 
 
 # --- Helper Functions ---
-def get_synonyms(word):
-    """Gets synonyms of a word from WordNet.  Limits to the same part of speech."""
+def get_synonyms(word: str, pos: str = None) -> Set[str]:
+    """Gets synonyms of a word from WordNet, optionally filtering by POS."""
     synonyms = set()
     for syn in wordnet.synsets(word):
-        for lemma in syn.lemmas():
-            # Only add synonyms of the same part of speech
-            if lemma.synset().pos() == syn.pos():
+        if pos is None or syn.pos() == pos:  # Optional POS filter
+            for lemma in syn.lemmas():
                 synonym = lemma.name().replace("_", " ").lower()
                 synonyms.add(synonym)
     return synonyms
 
-
-def _is_likely_skill(token):
-    """Checks if a verb (especially a gerund) or noun is likely describing a skill,
-    using dependency parsing for improved context.
-    """
-    # Check if the token is part of a compound noun (e.g., "data analysis")
-    if token.dep_ == "compound":
+def _is_likely_skill(token: spacy.tokens.Token) -> bool:
+    """Checks if a token is likely part of a skill phrase (simplified)."""
+    if token.dep_ == "compound":  # Compound nouns (e.g., "data analysis")
+        return True
+    if token.pos_ == "VERB" and token.text.endswith("ing"): # Check verbs
+        return True
+    if token.pos_ == "NOUN": # Check nouns
         return True
 
-    # Check for verbs indicating skills (e.g., "managing", "developing")
-    if token.pos_ == "VERB" and token.text.endswith("ing"):
-        # Check for dependency relations that suggest a skill context
-        if token.dep_ in ("xcomp", "advcl", "ROOT"):  # Open clausal complement, adverbial clause modifier
-            return True
-
-    # Check for nouns connected to skill-related verbs via prepositional phrases
-    if token.pos_ == "NOUN":
-        for child in token.children:
-            if child.dep_ == "prep":  # Prepositional modifier
-                for prep_child in child.children:
-                    # Check if the prepositional phrase is connected to a skill-related verb
-                    if prep_child.pos_ == "VERB" and _is_likely_skill(prep_child):  # Recursive check
-                        return True
     return False
 
 
@@ -68,41 +63,57 @@ def _is_likely_skill(token):
 class TextPreprocessor:
     """Handles text preprocessing."""
 
-    def __init__(self, config):
+    def __init__(self, config: Dict):
+        """Initializes the TextPreprocessor with configuration."""
         self.config = config
         self.stop_words = self._load_stop_words()
+        self.lemmatizer = WordNetLemmatizer() # Use WordNetLemmatizer
 
     def _load_stop_words(self) -> Set[str]:
-        """Loads stop words from the configuration file, with additions and exclusions."""
-        base_stop_words = set(self.config['stop_words'])
-        additional_stop_words = set(self.config.get('stop_words_add', []))
-        exclude_stop_words = set(self.config.get('stop_words_exclude', []))
-
-        stop_words = (base_stop_words | additional_stop_words) - exclude_stop_words
+        """Loads stop words from the configuration."""
+        stop_words = set(self.config['stop_words'])
+        stop_words.update(self.config.get('stop_words_add', []))
+        stop_words.difference_update(self.config.get('stop_words_exclude', []))
         return stop_words
 
     def preprocess_text(self, text: str) -> str:
         """Cleans and standardizes text."""
         try:
             text = text.lower()
-            text = re.sub(r'[\n\t]+', ' ', text)
-            text = re.sub(r'http\S+|www.\S+', '', text)  # Remove URLs
-            text = re.sub(r'\S+@\S+', '', text)  # Remove email addresses
-            text = re.sub(r'[^\w\s-]', ' ', text)  # Remove punctuation except hyphens
-            text = re.sub(r'\s+', ' ', text).strip()  # Remove extra whitespace
+            text = re.sub(r'[\n\t]+', ' ', text)          # Remove newlines and tabs
+            text = re.sub(r'http\S+|www.\S+', '', text)   # Remove URLs
+            text = re.sub(r'\S+@\S+', '', text)           # Remove email addresses
+            text = re.sub(r'[^\w\s-]', ' ', text)          # Remove punctuation except hyphens
+            text = re.sub(r'\s+', ' ', text).strip()      # Remove extra whitespace
             return text
         except Exception as e:
-            logger.error(f"Error in text preprocessing: {str(e)}")
+            logger.error(f"Error in text preprocessing: {e}")
             raise
+
+    def tokenize_and_lemmatize(self, text: str) -> List[str]:
+        """Tokenizes, lemmatizes, and filters text."""
+        doc = nlp(text)
+        tokens = []
+        for token in doc:
+            if token.text in self.stop_words or len(token.text) <= 1 or token.text.isnumeric():
+                continue # Skip stop words, short words, and numbers
+
+            if token.pos_ in {"NOUN", "ADJ", "PROPN", "VERB"}:
+                lemma = self.lemmatizer.lemmatize(token.text, pos='v' if token.pos_ == 'VERB' else 'n')
+                tokens.append(lemma)
+        return tokens
+
 
 
 class KeywordExtractor:
     """Extracts keywords from preprocessed text."""
 
-    def __init__(self, config):
+    def __init__(self, config: Dict):
+        """Initializes the KeywordExtractor with configuration."""
         self.config = config
         self.skills_whitelist = set(self.config['skills_whitelist'])
-        self.preprocessor = TextPreprocessor(self.config)  # Use composition
+        self.preprocessor = TextPreprocessor(self.config)
+        self.allowed_entity_types = set(self.config.get('allowed_entity_types', ["ORG", "PRODUCT"])) # Configurable entity types
 
     def extract_ngrams(self, tokens: List[str], n: int) -> List[str]:
         """Generates n-grams from a list of tokens."""
@@ -112,105 +123,85 @@ class KeywordExtractor:
         """Extracts keywords, including synonyms and named entities."""
         try:
             processed_text = self.preprocessor.preprocess_text(text)
-            doc = nlp(processed_text)  # Use spaCy for tokenization and POS tagging
-            keywords = []
-            keyword_groups = {}  # For grouping synonyms
+            tokens = self.preprocessor.tokenize_and_lemmatize(processed_text)
+            keywords = Counter()
 
-            for token in doc:
-                lemma = token.lemma_.lower()
+            # Add whitelisted skills directly
+            for skill in self.skills_whitelist:
+                if skill in processed_text:
+                    keywords[skill] += 1
 
-                # Check for hyphenated words in whitelist
-                if '-' in token.text and token.text in self.skills_whitelist:
-                    keywords.append(token.text)
-                    continue
+            # Add lemmatized tokens
+            keywords.update(tokens)
 
-                # Process nouns, adjectives, proper nouns, and verbs
-                if token.pos_ in {"NOUN", "ADJ", "PROPN", "VERB"}:
-                    if _is_likely_skill(token) or lemma in self.skills_whitelist or (
-                            lemma not in self.preprocessor.stop_words and len(lemma) > 1 and not lemma.isnumeric()):
-                        # Handle Synonyms (with POS check)
-                        synonyms = get_synonyms(lemma)
-                        for synonym in synonyms:
-                            if synonym in self.skills_whitelist or (
-                                    synonym not in self.preprocessor.stop_words and len(synonym) > 1):
-                                if lemma in keyword_groups:
-                                    keyword_groups[lemma].add(synonym)
-                                else:
-                                    keyword_groups[lemma] = {synonym}  # Use set for synonyms
-                                keywords.append(synonym)
-                        # Always add the original lemma if it meets criteria
-                        if lemma in self.skills_whitelist or (
-                                lemma not in self.preprocessor.stop_words and len(lemma) > 1):
-                            keywords.append(lemma)
-
-            # Noun Phrases (improved handling)
+            # Noun chunks (simplified)
+            doc = nlp(processed_text)  # Process with spaCy *after* preprocessing
             for chunk in doc.noun_chunks:
-                chunk_text = self.preprocessor.preprocess_text(chunk.text.lower())
-                # Check if any part of the chunk is in the whitelist or not a stop word
-                if any(word in self.skills_whitelist or word not in self.preprocessor.stop_words for word in
-                       chunk_text.split()) and len(chunk_text) > 1:
-                    keywords.append(chunk_text)
+              chunk_text = chunk.text.lower()
+              if any(word in self.skills_whitelist or word not in self.preprocessor.stop_words for word in chunk_text.split()):
+                keywords[chunk_text] += 1
 
-            # NER (simplified and focused)
-            doc_original = nlp(text)
-            for ent in doc_original.ents:
-                if ent.label_ in {"ORG", "PRODUCT"}:  # Focus on ORG and PRODUCT entities
+
+            # NER (using allowed entity types)
+            for ent in doc.ents:
+                if ent.label_ in self.allowed_entity_types:
                     entity_text = self.preprocessor.preprocess_text(ent.text.lower())
-                    if entity_text and entity_text not in self.preprocessor.stop_words:
-                        keywords.append(entity_text)
+                    if entity_text: # and entity_text not in self.preprocessor.stop_words:  # Optional: re-check stop words
+                        keywords[entity_text] += 1
 
-            # Extract bigrams and trigrams (prioritize whitelisted and non-stop word phrases)
-            tokens_text = [t.text for t in doc]
-            bigrams = self.extract_ngrams(tokens_text, 2)
-            trigrams = self.extract_ngrams(tokens_text, 3)
-            phrases = [phrase for phrase in bigrams + trigrams if
-                       phrase in self.skills_whitelist or all(
-                           word not in self.preprocessor.stop_words for word in phrase.split())]
-            keywords.extend(phrases)
-
-            return Counter(keywords)  # Use Counter for efficient counting
+            # Bigrams and Trigrams (filtered)
+            tokens_text = [t for t in tokens]
+            for n in [2, 3]:
+                for ngram in self.extract_ngrams(tokens_text, n):
+                    if any(word in self.skills_whitelist for word in ngram.split()) or all(word not in self.preprocessor.stop_words for word in ngram.split()):
+                        keywords[ngram] += 1
+            return keywords
 
         except Exception as e:
-            logger.error(f"Error in keyword extraction: {str(e)}")
+            logger.error(f"Error in keyword extraction: {e}")
             raise
 
 
 class JobDescriptionAnalyzer:
     """Analyzes job descriptions, computes TF-IDF, and generates output."""
 
-    def __init__(self, config):
+    def __init__(self, config: Dict):
+        """Initializes the JobDescriptionAnalyzer with configuration."""
         self.config = config
-        self.extractor = KeywordExtractor(self.config)  # Use composition
+        self.extractor = KeywordExtractor(self.config)
         self.keyword_categories = self.config.get('keyword_categories', {})
 
     def analyze_job_descriptions(self, job_descriptions: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Analyzes job descriptions, computes TF-IDF, and returns summary and pivot DataFrames."""
+        """Analyzes job descriptions and returns summary and pivot DataFrames."""
+        # Input Validation
+        if not isinstance(job_descriptions, dict):
+            raise TypeError("job_descriptions must be a dictionary.")
+        if not (2 <= len(job_descriptions) <= 100):
+            raise ValueError("job_descriptions must contain between 2 and 100 entries.")
+        for title, description in job_descriptions.items():
+            if not isinstance(title, str):
+                raise TypeError(f"Job title '{title}' must be a string.")
+            if not isinstance(description, str):
+                raise TypeError(f"Job description for '{title}' must be a string.")
+            if not description.strip():
+                raise ValueError(f"Job description for '{title}' is empty.")
+            if len(description.split()) < 10:
+                logger.warning(f"Job description for '{title}' is very short. Results may be unreliable.")
+
+        job_texts = list(job_descriptions.values())
+
+        # TF-IDF Vectorization (using custom tokenizer)
+        vectorizer = TfidfVectorizer(
+            analyzer='word',
+            tokenizer=self.extractor.get_keywords,
+            preprocessor=None, # Preprocessing handled within get_keywords
+            ngram_range=(1, 3), # Consider unigrams, bigrams, and trigrams directly
+            sublinear_tf=True,
+            use_idf=True
+        )
+
+
         try:
-            # Input Validation
-            if not isinstance(job_descriptions, dict):
-                raise TypeError("job_descriptions must be a dictionary.")
-            if not (2 <= len(job_descriptions) <= 100):
-                raise ValueError("job_descriptions must contain between 2 and 100 entries.")
-            for title, description in job_descriptions.items():
-                if not isinstance(title, str):
-                    raise TypeError(f"Job title '{title}' must be a string.")
-                if not isinstance(description, str):
-                    raise TypeError(f"Job description for '{title}' must be a string.")
-                if not description.strip():
-                    raise ValueError(f"Job description for '{title}' is empty.")
-                if len(description.split()) < 10:  # Check for minimum length
-                    logger.warning(f"Job description for '{title}' is very short.  Results may be unreliable.")
-
-            job_texts = list(job_descriptions.values())
-
-            # Use TfidfVectorizer with custom tokenizer and preprocessor
-            vectorizer = TfidfVectorizer(
-                analyzer='word',
-                tokenizer=self.extractor.get_keywords,
-                preprocessor=self.extractor.preprocessor.preprocess_text,
-                sublinear_tf=True,  # Apply sublinear scaling
-                use_idf=True
-            )
 
             tfidf_matrix = vectorizer.fit_transform(job_texts)
             feature_names = vectorizer.get_feature_names_out()
@@ -221,11 +212,12 @@ class JobDescriptionAnalyzer:
                 for j, score in zip(doc_vector.col, doc_vector.data):
                     keyword = feature_names[j]
                     category = "Other"
-                    # Categorize keywords (check if keyword is a substring of any category keyword)
-                    for cat, keywords in self.keyword_categories.items():
-                        if any(keyword in kw for kw in keywords):
+                    # Categorize keywords (using 'in' for substring matching)
+                    for cat, keywords_list in self.keyword_categories.items():
+                        if any(kw in keyword for kw in keywords_list): # Check if extracted keyword contains category keyword
                             category = cat
                             break
+
                     keyword_data.append({
                         'keyword': keyword,
                         'job_title': job_title,
@@ -239,16 +231,10 @@ class JobDescriptionAnalyzer:
                 logger.warning("No keywords were extracted.")
                 return pd.DataFrame(), pd.DataFrame()
 
-            # Pivot table: keywords vs job titles, values = TF-IDF
-            pivot_df = df.pivot_table(
-                index='keyword',
-                columns='job_title',
-                values='tfidf',
-                aggfunc='sum',
-                fill_value=0
-            )
+            # Pivot table: keywords vs job titles
+            pivot_df = df.pivot_table(index='keyword', columns='job_title', values='tfidf', aggfunc='sum', fill_value=0)
 
-            # Summary statistics: total TF-IDF, job count, average TF-IDF
+            # Summary statistics
             summary_stats = df.groupby('keyword').agg(
                 total_tfidf=('tfidf', 'sum'),
                 job_count=('job_title', 'nunique'),
@@ -265,30 +251,39 @@ class JobDescriptionAnalyzer:
             return summary_stats, pivot_df
 
         except Exception as e:
-            logger.error(f"Error in job description analysis: {str(e)}")
+            logger.error(f"Error in job description analysis: {e}")
             raise
-
+    # ... (rest of the JobDescriptionAnalyzer class)
 
 class JobKeywordAnalyzer:
-    """Main class to coordinate analysis."""
+    """Main class to coordinate the analysis."""
 
-    def __init__(self, config_file="config.yaml"):
-        with open(config_file, 'r') as f:
-            self.config = yaml.safe_load(f)
+    def __init__(self, config_file: str = "config.yaml"):
+        """Initializes the JobKeywordAnalyzer with the configuration file."""
+        try:
+            with open(config_file, 'r') as f:
+                self.config = yaml.safe_load(f)
+        except FileNotFoundError:
+            logger.error(f"Configuration file not found: {config_file}")
+            raise
+        except yaml.YAMLError as e:
+            logger.error(f"Error parsing YAML in {config_file}: {e}")
+            raise
 
-        self.analyzer = JobDescriptionAnalyzer(self.config)  # Use composition
+        self.analyzer = JobDescriptionAnalyzer(self.config)
 
-    def analyze_jobs(self, job_descriptions: Dict[str, str]):
-        """Analyzes job descriptions and returns results."""
+    def analyze_jobs(self, job_descriptions: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Analyzes job descriptions and returns the results."""
         return self.analyzer.analyze_job_descriptions(job_descriptions)
+
 
 
 def main():
     """Main function to perform analysis and save results."""
-    try:
-        analyzer = JobKeywordAnalyzer()  # Use the configuration file
 
-        # Sample job descriptions (more varied and longer)
+    try:
+        analyzer = JobKeywordAnalyzer()
+
         job_descriptions = {
             "Data Science Product Owner": (
                 "People deserve more from their money.  We are looking for a Data Science Product Owner "
@@ -329,7 +324,6 @@ def main():
                 "Good communication and teamwork skills are essential.  Experience with Node.js is a plus."
             )
         }
-
         summary_df, pivot_df = analyzer.analyze_jobs(job_descriptions)
 
         if summary_df.empty:
@@ -350,17 +344,11 @@ def main():
         print("\nTop Keywords (Sorted by Total TF-IDF):")
         print(summary_df[['keyword', 'Total TF-IDF']].head(20))
 
+
     except Exception as e:
-        logger.error(f"Error during main execution: {str(e)}")
-        raise
+        logger.exception("An error occurred during main execution:") # Use exception for full traceback
+
 
 
 if __name__ == "__main__":
-    # Download required NLTK resources if not already present
-    for resource in ['punkt', 'wordnet', 'averaged_perceptron_tagger']:
-        try:
-            nltk.data.find(
-                f'tokenizers/{resource}' if resource == 'punkt' else f'corpora/{resource}' if resource == 'wordnet' else f'taggers/{resource}')
-        except LookupError:
-            nltk.download(resource, quiet=True)
     main()
