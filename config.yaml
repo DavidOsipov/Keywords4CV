@@ -1,94 +1,319 @@
 # config.yaml
+
+# --- Stop Words ---
+# A comprehensive list of common words to be excluded from keyword analysis.
+# This list is very extensive to filter out noise from job descriptions.
 stop_words:
   - a
   - about
   - above
+  - across
+  - adept
   - after
   - again
   - against
+  - able
   - all
   - am
   - an
   - and
   - any
+  - apply
   - are
+  - area
+  - aren't
   - as
+  - aspect
+  - assist
+  - associate
   - at
+  - ability
+  - approach
+  - accurate
+  - accurately
+  - accountable
+  - action
+  - adept
+  - administer
+  - agile
+  - allows
+  - along
+  - already
+  - always
+  - amongst
+  - analyst
+  - another
+  - anyway
+  - anywhere
+  - apart
+  - appropriate
+  - approximately
+  - architecture
+  - around
+  - assess
+  - associated
+  - assuring
+  - ate
+  - available
+  - average
+  - background
+  - based
   - be
   - because
   - been
   - before
   - being
   - below
+  - benefits
+  - best
+  - better
   - between
+  - bi
   - both
   - but
   - by
   - can
-  - did
+  - candidate
+  - certain
+  - challenge
+  - change
+  - client
+  - closely
+  - collaboration
+  - comfortable
+  - company
+  - component
+  - compliance
+  - comprehensive
+  - condition
+  - contribute
+  - could
+  - currently
+  - customer
+  - day
+  - detail
+  - detailed
+  - description
+  - design
+  - development
+  - different
+  - directly
+  - discussion
+  - document
+  - domain
   - do
   - does
   - doing
   - down
+  - duty
   - during
   - each
+  - eager
+  - effectively
+  - efficiently
+  - element
+  - ensure
+  - essential
+  - excited
+  - excellent
+  - excited
+  - expert
+  - experience
+  - factor
+  - familiar
   - few
+  - field
+  - first
   - for
   - from
+  - frontend
+  - future
   - further
+  - general
+  - generally
+  - given
+  - global
+  - goal
+  - good
+  - great
+  - greetings
+  - growth
+  - guideline
   - had
   - has
   - have
   - having
   - he
+  - hello
+  - help
   - her
   - here
   - hers
   - herself
+  - hi
+  - highly
   - him
   - himself
+  - hire
   - his
   - how
   - i
   - if
-  - in
+  - improvement
+  - including
+  - indirectly
+  - industry
+  - information
+  - innovation
+  - input
+  - inside
+  - interaction
+  - internal
+  - international
   - into
   - is
+  - issue
   - it
   - its
   - itself
+  - job
+  - join
+  - junior
   - just
+  - key
+  - knowledge
+  - last
+  - lead
+  - learning
+  - level
+  - local
+  - looking
+  - main
+  - manage
+  - manager
+  - many
+  - market
+  - master
   - me
+  - meeting
+  - methodology
+  - month
   - more
   - most
+  - much
+  - multiple
+  - must
   - my
   - myself
+  - national
+  - need
+  - new
+  - next
   - no
+  - normally
   - nor
   - not
   - now
+  - objective
+  - offer
   - of
   - off
+  - often
   - on
+  - ongoing
   - once
   - only
+  - ongoing
+  - opportunity
   - or
+  - organization
   - other
+  - outcome
   - our
   - ours
   - ourselves
   - out
+  - output
   - over
+  - overview
   - own
+  - participate
+  - particular
+  - partner
+  - part
+  - past
+  - passion
+  - perform
   - per
+  - platform
+  - please
+  - policy
+  - position
+  - practice
+  - present
+  - presentation
+  - previous
+  - primary
+  - problem
+  - procedure
+  - process
+  - proficient
+  - program
+  - project
+  - protocol
+  - provided
+  - proven
+  - purpose
+  - qualifications
+  - quickly
+  - r
+  - ready
+  - re
+  - regard
+  - regarding
+  - regards
+  - regularly
+  - regulation
+  - related
+  - report
+  - requirement
+  - required
+  - respect
+  - responsibilities
+  - responsible
+  - result
+  - right
+  - role
   - s
   - same
+  - second
+  - section
+  - sector
+  - seeking
+  - senior
+  - several
   - she
   - should
+  - skills
   - so
+  - solution
   - some
+  - sometimes
+  - specific
+  - stakeholder
+  - standard
+  - strong
+  - structure
   - such
+  - summary
+  - support
+  - system
   - t
+  - task
+  - team
+  - technology
+  - term
+  - thanks
   - than
   - that
   - the
@@ -100,17 +325,33 @@ stop_words:
   - there
   - these
   - they
+  - third
   - this
   - those
+  - thorough
   - through
   - to
   - too
+  - tool
+  - total
+  - training
+  - transformation
+  - typically
+  - understanding
   - under
   - until
+  - upcoming
   - up
+  - usually
+  - using
+  - various
+  - vendor
   - very
+  - want
   - was
   - we
+  - week
+  - well
   - were
   - what
   - when
@@ -118,252 +359,38 @@ stop_words:
   - which
   - while
   - who
+  - whole
   - whom
   - why
   - will
   - with
+  - within
+  - whole
+  - will
+  - with
+  - work
+  - working
+  - within
   - you
+  - year
   - your
   - yours
   - yourself
   - yourselves
-  - job
-  - description
-  - role
-  - required
-  - responsibilities
-  - work
-  - experience
-  - skills
-  - qualifications
-  - summary
-  - benefits
-  - company
-  - team
-  - opportunity
-  - candidate
-  - apply
-  - application
-  - position
-  - looking
-  - join
-  - across
-  - within
-  - ensure
-  - must
-  - able
-  - based
-  - well
-  - working
-  - strong
-  - excellent
-  - proven
-  - including
-  - related
-  - various
-  - using
-  - help
-  - new
-  - day
-  - week
-  - month
-  - year
-  - level
-  - senior
-  - junior
-  - associate
-  - manager
-  - support
-  - assist
-  - perform
-  - participate
-  - contribute
-  - knowledge
-  - understanding
-  - ability
-  - good
-  - great
-  - better
-  - best
-  - main
-  - key
-  - essential
-  - primary
-  - typically
-  - task
-  - duty
-  - goal
-  - objective
-  - purpose
-  - background
-  - overview
-  - detail
-  - information
-  - regard
-  - respect
-  - different
-  - multiple
-  - several
-  - certain
-  - specific
-  - particular
-  - given
-  - provided
-  - offer
-  - seeking
-  - hire
-  - need
-  - want
-  - desire
-  - passion
-  - eager
-  - ready
-  - excited
-  - comfortable
-  - familiar
-  - proficient
-  - adept
-  - expert
-  - master
-  - highly
-  - effectively
-  - efficiently
-  - quickly
-  - accurately
-  - closely
-  - directly
-  - indirectly
-  - often
-  - sometimes
-  - usually
-  - generally
-  - normally
-  - regularly
-  - currently
-  - recently
-  - future
-  - past
-  - present
-  - ongoing
-  - upcoming
-  - previous
-  - first
-  - second
-  - third
-  - next
-  - last
-  - another
-  - every
-  - each
-  - some
-  - any
-  - all
-  - both
-  - few
-  - many
-  - much
-  - several
-  - various
-  - certain
-  - particular
-  - specific
-  - general
-  - overall
-  - total
-  - whole
-  - part
-  - section
-  - aspect
-  - area
-  - field
-  - domain
-  - sector
-  - industry
-  - market
-  - customer
-  - client
-  - user
-  - partner
-  - vendor
-  - stakeholder
-  - internal
-  - external
-  - global
-  - local
-  - national
-  - international
-  - organization
-  - structure
-  - process
-  - system
-  - tool
-  - platform
-  - technology
-  - methodology
-  - approach
-  - technique
-  - practice
-  - standard
-  - guideline
-  - procedure
-  - protocol
-  - policy
-  - regulation
-  - compliance
-  - requirement
-  - condition
-  - term
-  - factor
-  - element
-  - component
-  - issue
-  - problem
-  - challenge
-  - solution
-  - result
-  - outcome
-  - output
-  - input
-  - data
-  - information
-  - report
-  - document
-  - presentation
-  - interaction
-  - collaboration
-  - meeting
-  - discussion
-  - training
-  - learning
-  - growth
-  - development
-  - improvement
-  - innovation
-  - change
-  - transformation
-  - lead
-  - manage
-  - own
-  - responsible
-  - accountable
-  - effective
-  - efficient
-  - accurate
-  - clear
-  - concise
-  - comprehensive
-  - detailed
-  - thorough
-  - regards
-  - thanks
-  - please
-  - hello
-  - hi
-  - regard
-  - best
-  - greetings
-  - bi
 
+# --- Additional Stop Words ---
+# Add any custom stop words here that are specific to your domain.
+# Words listed here will be *added* to the base stop_words list above.
+stop_words_add: []
+
+# --- Stop Words to Exclude ---
+# If you want to *keep* a word that's normally considered a stop word, list it here.
+# Words listed here will be *removed* from the base stop_words list above.
+stop_words_exclude: []
+
+# --- Skills Whitelist ---
+# A highly comprehensive list of skills and technologies relevant to various tech and product roles.
+# This list is crucial for accurate keyword extraction. Expand and customize it as needed.
 skills_whitelist:
   - python
   - sql
@@ -582,73 +609,285 @@ skills_whitelist:
   - beta test
   - digital transformation
   - end-user era
+  - statistical analysis # Added statistical analysis as it was missing from previous whitelist
 
-stop_words_add: []
-stop_words_exclude: []
+# --- Allowed Entity Types for NER ---
+# Specify which named entity types to extract using spaCy's Named Entity Recognition (NER).
+# Common and useful types for job description analysis are listed below.
+# - ORG: Organizations (companies, agencies, etc.)
+# - PRODUCT: Product names
+# - GPE: Geopolitical entities (countries, cities, states)
+# - EVENT: Named events (conferences, wars, etc.)
+# - WORK_OF_ART: Titles of books, songs, etc.
+# - LAW: Named laws and legal documents
+# - PERSON: People's names (generally less useful for job skills)
+# - DATE: Dates and times (generally less useful for job skills)
+# - MONEY: Monetary values (generally less useful for job skills)
+allowed_entity_types:
+  - ORG
+  - PRODUCT
+  - GPE
+  - EVENT
+  - WORK_OF_ART
+  - LAW
 
+# --- Output Directory ---
+# Directory where the output Excel file will be saved.
 output_dir: output
 
+# --- Keyword Categories ---
+# Define categories to group extracted keywords for better organization in the output.
+# Keywords listed under each category are used for *substring matching*.
+# For example, if "machine learning engineer" is extracted and "machine learning" is under "Technical Skills",
+# then "machine learning engineer" will be categorized as "Technical Skills".
 keyword_categories:
-    Technical Skills:
-      - python
-      - sql
-      - java
-      - javascript
-      - typescript
-      - react
-      - angular
-      - vue
-      - node
-      - aws
-      - azure
-      - gcp
-      - docker
-      - kubernetes
-      - excel
-      - powerpoint
-      - tableau
-      - power bi
-      - tensorflow
-      - pytorch
-      - keras
-      - scikit-learn
-      - pandas
-      - numpy
-      - matplotlib
-      - seaborn
-      - git
-      - jira
-      - confluence
-      - slack
-      - mongodb
-      - postgresql
-      - mysql
-      - redis
-      - elasticsearch
-      - data analysis
-      - ml
-      - ai
-      - machine learning
-      - deep learning
-      - natural language processing
-      - nlp
-      - api
-      - rest
-      - graphql
-      - ci/cd
-    Soft Skills:
-      - communication
-      - negotiation
-      - problem-solving
-      - time management
-      - leadership
-      - teamwork
-      - critical thinking
-      - adaptability
-      - presentation skills
-    Industry Knowledge:
-      - project management
-      - business analysis
-      - product management
-      - devops
-    Other: []
+  Technical Skills:
+    - python
+    - sql
+    - java
+    - javascript
+    - typescript
+    - react
+    - angular
+    - vue
+    - node
+    - aws
+    - azure
+    - gcp
+    - docker
+    - kubernetes
+    - excel
+    - powerpoint
+    - tableau
+    - power bi
+    - tensorflow
+    - pytorch
+    - keras
+    - scikit-learn
+    - pandas
+    - numpy
+    - matplotlib
+    - seaborn
+    - git
+    - jira
+    - confluence
+    - slack
+    - mongodb
+    - postgresql
+    - mysql
+    - redis
+    - elasticsearch
+    - data analysis
+    - ml
+    - ai
+    - machine learning
+    - deep learning
+    - natural language processing
+    - nlp
+    - api
+    - rest
+    - graphql
+    - ci/cd
+    - data visualization
+    - big data
+    - cloud computing
+    - html
+    - css
+    - mobile development
+    - frontend development
+    - backend development
+    - full stack development
+    - statistical modeling
+    - data mining
+    - computer vision
+    - time series analysis
+    - regression analysis
+    - classification
+    - clustering
+    - dimensionality reduction
+    - feature engineering
+    - model selection
+    - hyperparameter tuning
+    - a/b testing
+    - etl
+    - devops
+    - continuous integration
+    - continuous delivery
+    - continuous deployment
+    - version control
+    - testing
+    - unit testing
+    - integration testing
+    - system testing
+    - user acceptance testing
+    - uat
+    - performance testing
+    - load testing
+    - stress testing
+    - security testing
+    - penetration testing
+    - vulnerability assessment
+    - cross-platform development
+    - flutter
+    - react native
+    - xamarin
+    - swift
+    - objective-c
+    - kotlin
+    - api design
+    - microservices
+    - serverless
+    - cloud functions
+    - lambda
+    - azure functions
+    - google cloud functions
+    - containerization
+    - orchestration
+    - linux
+    - unix
+    - windows server
+    - shell scripting
+    - bash
+    - powershell
+    - networking
+    - tcp/ip
+    - http
+    - https
+    - dns
+    - load balancing
+    - firewalls
+    - vpn
+    - cybersecurity
+    - information security
+    - threat modeling
+    - risk assessment
+    - incident response
+    - business intelligence
+    - bi
+    - reporting
+    - dashboards
+    - data storytelling
+    - statistical analysis # Added statistical analysis to technical skills
+
+  Soft Skills:
+    - communication
+    - negotiation
+    - problem-solving
+    - time management
+    - leadership
+    - teamwork
+    - critical thinking
+    - adaptability
+    - presentation skills
+    - collaboration
+    - organizational skills
+    - analytical skills
+    - client management
+    - customer service
+    - interpersonal skills # Added interpersonal skills as a soft skill
+
+  Industry Knowledge:
+    - project management
+    - business analysis
+    - product management
+    - devops
+    - agile
+    - scrum
+    - kanban
+    - jira
+    - confluence
+    - saas
+    - software as a service
+    - product lifecycle management
+    - plm
+    - data governance
+    - data quality
+    - data security
+    - data privacy
+    - gdpr
+    - ccpa
+    - market research
+    - competitive analysis
+    - user research
+    - customer research
+    - strategic planning
+    - product strategy
+    - roadmapping
+    - product roadmap
+    - requirements elicitation
+    - requirements analysis
+    - requirements gathering
+    - requirements management
+    - process modeling
+    - process improvement
+    - business process modeling
+    - uml
+    - bpmn
+    - business process model and notation
+    - use cases
+    - user acceptance testing
+    - uat
+    - quality assurance
+    - qa
+    - data modeling
+    - business process reengineering
+    - bpr
+    - risk management
+    - budget management
+    - resource management
+    - scope management
+    - project planning
+    - project execution
+    - project monitoring
+    - project control
+    - waterfall
+    - prince2
+    - pmp
+    - project management professional
+    - gantt charts
+    - gantt chart
+    - critical path
+    - critical path method
+    - cpm
+    - communication planning
+    - change management
+    - issue tracking
+    - issue resolution
+    - conflict resolution
+    - agile methodologies
+    - scrum master
+    - certified scrum master
+    - csm
+    - product owner
+    - certified product owner
+    - cspo
+    - sprint planning
+    - sprint review
+    - sprint retrospective
+    - daily scrum
+    - daily standup
+    - iterative development
+    - incremental development
+    - sprint
+    - sprint backlog
+    - backlog grooming
+    - definition of done
+    - planning poker
+    - retrospective
+    - scope creep
+    - standup
+    - story point
+    - lean software development
+    - lsd
+    - customer journey mapping
+    - empathy mapping
+    - design thinking
+    - lean startup
+    - user persona
+    - product marketing manager
+    - product operations
+    - go-to-market strategy
+    - product lifecycle
+    - requirements management
+
+  Other: []  # Keywords that don't neatly fit into the above categories. Customize as needed.
