@@ -609,7 +609,6 @@ skills_whitelist:
   - beta test
   - digital transformation
   - end-user era
-  - statistical analysis # Added statistical analysis as it was missing from previous whitelist
 
 # --- Allowed Entity Types for NER ---
 # Specify which named entity types to extract using spaCy's Named Entity Recognition (NER).
@@ -891,3 +890,6 @@ keyword_categories:
     - requirements management
 
   Other: []  # Keywords that don't neatly fit into the above categories. Customize as needed.
+  
+  ngram_range: [1, 3]
+  similarity_threshold: 0.7
