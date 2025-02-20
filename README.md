@@ -62,7 +62,7 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 *   Python 3.8+
 *   Required libraries (install via pip):
     ```bash
-    pip install pandas nltk spacy scikit-learn pyyaml python-levenshtein
+    pip install pandas nltk spacy scikit-learn pyyaml psutil
     ```
 *   Download the spaCy English language model:
     ```bash
@@ -115,7 +115,7 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
    * `-c` or `--config`: Path to the configuration file (optional, defaults to `config.yaml`).
    * `-o` or `--output`: Path to the output Excel file (optional, defaults to `results.xlsx`).
 
-4.  **Review the output:** The Excel file (e.g., `results.xlsx`) will be saved in the specified `output_dir`.
+4.  **Review the output:** The Excel file (e.g., `results.xlsx`) will be saved in the same directory where you run the script.
 
 ## Repository Structure
 
@@ -123,10 +123,10 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 *   `config.yaml`:  The configuration file.
 *   `README.md`: This file.
 *   `output/`: (Created automatically) The directory for storing Excel output and log files.
-*   `requirements.txt` (Optional, but highly recommended): List of required packages.  Create with `pip freeze > requirements.txt`.
-* `tests/`: Directory for unit tests (recommended, but not included in this initial version).
-* `job_descriptions.json`: Example input file.
-* `ats_optimizer.log`: Log file.
+*   `requirements.txt`: List of required packages.  *(It's recommended to create one using `pip freeze > requirements.txt`)*.
+*   `tests/`: Directory for unit tests.
+*   `job_descriptions.json`: Example input file.
+*   `ats_optimizer.log`: Log file.
 
 ## Contributing
 
