@@ -4,4 +4,4 @@ pandas==2.2.3
 spacy==3.8.4
 pyyaml==6.0.2
 scikit-learn==1.5.0
-psutil==5.9.8
+psutil==7.0.0
