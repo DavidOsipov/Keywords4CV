@@ -6,54 +6,65 @@
 
 Keywords4CV is a Python-based tool designed to help job seekers optimize their resumes and LinkedIn profiles for Applicant Tracking Systems (ATS) and human recruiters. It analyzes a collection of job descriptions and extracts the most important and relevant keywords, enabling users to tailor their application materials to specific job roles. By incorporating these keywords, users can significantly increase their chances of getting noticed by both ATS and recruiters, leading to more interview opportunities.
 
+
 ## State of production
 
-**Not ready!**
+**Not ready!  Under active development.**
 
 ## Features
 
-*   **Keyword Extraction:** Identifies key skills, qualifications, and terminology from job descriptions using NLP techniques (spaCy, NLTK, scikit-learn).
-*   **TF-IDF Analysis:** Computes Term Frequency-Inverse Document Frequency (TF-IDF) scores, combined with *whitelist boosting* and *keyword frequency*, to determine the importance of keywords across multiple job descriptions.
-*   **Synonym Suggestion:** Includes a synonym suggestion feature to help expand the keyword coverage.
-*   **Configurable:** Uses a `config.yaml` file for easy customization of:
-    *   Stop words (with options to add and exclude specific words).
-    *   Skills whitelist.
-    *   Keyword categories and their associated terms.
-    *   Output directory.
-    *   N-gram range for keyword extraction.
-    *   Similarity threshold for categorization.
-    *   Weighting for TF-IDF, frequency, and whitelist boost.
-*   **Output:** Generates an Excel report with:
-    *   **Keyword Summary:** A summary of keywords with their combined scores, job counts, and assigned categories.
-    *   **Job Specific Details:** A pivot table showing the combined scores of keywords for each individual job title.
-*   **Input Validation:** Includes robust input validation to handle various edge cases (e.g., non-string keys, empty descriptions, incorrect file formats).
-*   **Command-Line Interface:** Uses `argparse` for a user-friendly command-line interface.
-*   **Error Handling:** Includes comprehensive error handling and logging.
-*   **Multiprocessing for Analysis:** Leverages multiprocessing to run the core analysis in a separate process, enhancing robustness and enabling timeout functionality.
-*   **Caching:** Preprocessing results are cached to minimize redundant computations.
-*   **SpaCy optimization:**  spaCy pipeline components that are not needed (parser, ner) are disabled for efficiency.
-*   **NLTK resource management**: The script automatically manages required NLTK resources.
-*   **Timeout Mechanism:** Implements a configurable timeout to prevent long-running analyses and ensure script stability, especially when processing large job description datasets or encountering unexpected issues.
+*   **Enhanced Keyword Extraction:** Identifies key skills, qualifications, and terminology from job descriptions using advanced NLP techniques (spaCy, NLTK, scikit-learn).  Improved accuracy and handling of edge cases.
+*   **TF-IDF Analysis with Advanced Weighting:** Computes Term Frequency-Inverse Document Frequency (TF-IDF) scores, combined with *whitelist boosting* and *keyword frequency*.  Configurable weights allow for fine-tuning keyword importance.
+*   **Synonym Expansion:**  Leverages WordNet to suggest synonyms, expanding keyword coverage and improving semantic matching.
+*   **Highly Configurable:** Uses a `config.yaml` file for extensive customization:
+    *   Stop words (with options to add and exclude specific words).  More comprehensive default stop word list.
+    *   Skills whitelist:  Extensive and customizable whitelist of technical and soft skills.
+    *   Keyword categories and semantic categorization: Group keywords into meaningful categories for better report organization. Semantic categorization using word vectors for improved accuracy.
+    *   Output directory: Control where reports and logs are saved.
+    *   N-gram range for keyword extraction: Adjust for unigrams, bigrams, trigrams, and more.
+    *   Similarity threshold for categorization: Fine-tune semantic category assignment.
+    *   Weighting for TF-IDF, frequency, and whitelist boost:  Customize the scoring mechanism.
+    *   Description length limits and job count thresholds: Configure input validation rules.
+*   **Detailed Output Reports:** Generates comprehensive Excel reports:
+    *   **Keyword Summary:**  Aggregated keyword scores, job counts, average scores, and assigned categories, providing a high-level overview.
+    *   **Job Specific Details:** Pivot table showing keyword scores for each job title, enabling targeted resume customization.
+*   **Robust Input Validation:**  Rigorous validation of job descriptions, handling empty titles, descriptions, incorrect data types, and encoding issues.  Clear error messages and logging for invalid inputs.
+*   **User-Friendly Command-Line Interface:**  `argparse` provides a clear and easy-to-use command-line interface for script execution.
+*   **Comprehensive Error Handling and Logging:**  Detailed logging using `logging` module, capturing informational messages, warnings, and errors to `ats_optimizer.log`.  Improved error handling for configuration issues, input validation failures, and unexpected exceptions with informative exit codes.
+*   **Multiprocessing for Robust Analysis:** Core analysis runs in a separate process using `multiprocessing`, enhancing stability and enabling timeout control, especially for large datasets.
+*   **Efficient Caching:**  Extensive caching mechanisms using `functools.lru_cache` and `OrderedDict` to minimize redundant computations during text preprocessing and keyword categorization, significantly improving performance. Cache invalidation on configuration changes.
+*   **SpaCy Pipeline Optimization:** Disables unnecessary spaCy pipeline components (`parser`, `ner`) for increased efficiency and reduced memory footprint.
+*   **Automatic NLTK Resource Management:**  Ensures required NLTK resources (WordNet) are automatically downloaded if missing, simplifying setup.
+*   **Configurable Timeout Mechanism:** Prevents script hangs and resource exhaustion with a configurable timeout, ensuring stability even with problematic inputs or large datasets.
+*   **Memory Management and Chunking:** Implements memory monitoring and adaptive chunking for processing large job description datasets, preventing memory errors.  Caches are cleared proactively to manage memory usage.
+*   **Extensive Unit Testing:**  Includes a comprehensive suite of unit tests using `unittest` and `pytest` in the `tests/` directory, ensuring code quality, reliability, and facilitating future development.  Tests cover core functionalities, edge cases, and configuration scenarios.
 
 ## How it Works
 
-1.  **Input:** The script takes a JSON file as input via the command line:
+1.  **Input:** The script accepts a JSON file (e.g., `job_descriptions.json`) as input via the command line. The JSON should contain:
     *   **Keys:** Job titles (strings).
     *   **Values:** Full text of the corresponding job descriptions (strings).
-2.  **Preprocessing:** The text is cleaned (lowercase, URL/email/special character removal) and tokenized/lemmatized using spaCy and NLTK. A cache is used for efficiency.
-3.  **Keyword Extraction:**
-    *   **Whitelist Matching:**  Identifies exact phrase matches for skills in the whitelist.
-    *   **N-gram Generation:** Generates n-grams (multi-word phrases) based on the configured `ngram_range`.
-    *   **Tokenization and Lemmatization:** Processes the text into individual tokens and reduces words to their base form (lemmas).
-4.  **Keyword Weighting:**
-    *   Calculates TF-IDF scores using scikit-learn's `TfidfVectorizer`.
-    *   Applies a *whitelist boost* to keywords found in the whitelist.
-    *   Factors in the *frequency* of each keyword.
-    *   Combines these factors using configurable weights.
-5.  **Keyword Categorization:**
-    *   Calculates the semantic similarity between each keyword and user-defined categories using word embeddings and cosine similarity.
-    *   Assigns keywords to categories based on a similarity threshold (configurable in `config.yaml`).
-6.  **Output Generation:** Creates pandas DataFrames and saves them to an Excel file.
+2.  **Preprocessing:** Input job descriptions undergo thorough preprocessing:
+    *   Text cleaning: Lowercasing, removal of URLs, emails, special characters, and extra whitespace using regular expressions.
+    *   Tokenization and Lemmatization:  spaCy and NLTK are used for tokenization and lemmatization, reducing words to their base forms.
+    *   Stop word removal: Configurable stop word list is used to remove common and irrelevant words.
+    *   Caching: Preprocessed text is cached for efficiency using an LRU cache.
+3.  **Keyword Extraction:**  Advanced keyword extraction techniques are employed:
+    *   Whitelist Matching:  Exact and lemmatized phrase matching against the extensive `skills_whitelist` in `config.yaml`.
+    *   N-gram Generation: Generates n-grams (unigrams, bigrams, trigrams, etc.) based on the `ngram_range` configuration.
+    *   Synonym Expansion:  WordNet is used to generate synonyms for whitelist skills, expanding keyword detection.
+4.  **Keyword Weighting and Scoring:** A sophisticated scoring system determines keyword relevance:
+    *   TF-IDF Calculation:  `TfidfVectorizer` from scikit-learn calculates TF-IDF scores, reflecting keyword importance across job descriptions.
+    *   Whitelist Boosting: Keywords from the `skills_whitelist` receive a configurable boost, prioritizing essential skills.
+    *   Frequency Weighting: Keyword frequency within job descriptions is factored into the score.
+    *   Configurable Weights:  The contribution of TF-IDF, frequency, and whitelist boost is controlled by weights in `config.yaml`.
+5.  **Semantic Keyword Categorization:** Keywords are intelligently categorized:
+    *   Category Definitions:  `config.yaml` defines keyword categories (e.g., "Technical Skills", "Soft Skills") and associated terms.
+    *   Semantic Similarity: Word vectors from spaCy and cosine similarity are used to measure the semantic similarity between extracted keywords and category terms.
+    *   Category Assignment: Keywords are assigned to categories based on the highest semantic similarity score above a configurable `similarity_threshold`.
+6.  **Output Generation:** Results are organized and presented in user-friendly Excel reports:
+    *   Keyword Summary Sheet:  Provides a ranked list of keywords with aggregated "Total_Score", "Avg_Score", "Job_Count", and assigned "Category".
+    *   Detailed Scores Sheet:  A pivot table showing the "Score" for each "Keyword" across each "Job Title", enabling detailed analysis and targeted resume tailoring.
 
 ## Getting Started
 
@@ -62,7 +73,7 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 *   Python 3.8+
 *   Required libraries (install via pip):
     ```bash
-    pip install pandas nltk spacy scikit-learn pyyaml python-levenshtein
+    pip install pandas nltk spacy scikit-learn pyyaml psutil pytest
     ```
 *   Download the spaCy English language model:
     ```bash
@@ -76,7 +87,7 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
     git clone https://github.com/DavidOsipov/Keywords4Cv.git
     cd Keywords4Cv
     ```
-2.  (Optional but recommended) Create and activate a virtual environment:
+2.  (Optional but highly recommended) Create and activate a virtual environment:
     ```bash
     python3 -m venv venv
     source venv/bin/activate  # On Linux/macOS
@@ -97,15 +108,16 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
     ```
 
 2.  **Customize `config.yaml`:**  Modify the `config.yaml` file to adjust:
-    *   `stop_words`, `stop_words_add`, `stop_words_exclude`: Fine-tune the stop word list.
-    *   `skills_whitelist`:  Add skills and technologies relevant to your target roles.
-    *   `keyword_categories`: Define categories and associated terms for grouping keywords.
-    *   `output_dir`:  Specify the output directory.
-    *   `ngram_range`:  Set the desired n-gram range (e.g., `[1, 3]` for unigrams, bigrams, and trigrams).
-    *   `similarity_threshold`:  Adjust the threshold for category assignment.
-    *   `weighting`: Configure the weights for TF-IDF, frequency, and whitelist boost.
-    *   `min_desc_length`: Set minimum description length.
-    *    `min_jobs`: Set minimum number of job descriptions.
+    *   `stop_words`, `stop_words_add`, `stop_words_exclude`: Fine-tune the stop word list for your specific needs.
+    *   `skills_whitelist`:  Expand and customize the skills whitelist to include technologies and skills relevant to your target roles and industry.  The more comprehensive this list, the more accurate keyword extraction will be.
+    *   `keyword_categories`: Review and customize keyword categories and their associated terms to align with your desired output organization.
+    *   `output_dir`:  Specify a directory to save output reports and log files, or leave it to default to the current directory.
+    *   `ngram_range`:  Experiment with different n-gram ranges to optimize keyword extraction for your job descriptions. `[1, 3]` (unigrams, bigrams, trigrams) is a good starting point.
+    *   `similarity_threshold`:  Adjust the `similarity_threshold` if you want to fine-tune how keywords are assigned to categories based on semantic similarity.
+    *   `weighting`:  Customize the `weighting` parameters (`tfidf_weight`, `frequency_weight`, `whitelist_boost`) to adjust the keyword scoring mechanism.
+    *   `min_desc_length`, `min_jobs`, `max_desc_length`: Adjust input validation parameters as needed.
+    *   Explore other advanced configuration options in `config.yaml` to further tailor the tool to your specific requirements.
+
 3.  **Run the script:**
 
     ```bash
@@ -115,28 +127,48 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
    * `-c` or `--config`: Path to the configuration file (optional, defaults to `config.yaml`).
    * `-o` or `--output`: Path to the output Excel file (optional, defaults to `results.xlsx`).
 
-4.  **Review the output:** The Excel file (e.g., `results.xlsx`) will be saved in the specified `output_dir`.
+4.  **Review the output:** The Excel file (e.g., `results.xlsx`) will be generated in the same directory where you run the script. Examine the "Summary" and "Detailed Scores" sheets to identify top keywords and tailor your resume accordingly.  Check `ats_optimizer.log` for any warnings or errors during processing.
+
+### Running Unit Tests
+
+To ensure the script's functionality and stability, a suite of unit tests is included in the `tests/` directory.  It is highly recommended to run these tests after making any modifications to the code.
+
+1.  **Navigate to the `tests/` directory:**
+    ```bash
+    cd tests
+    ```
+
+2.  **Run the tests using `pytest`:**
+    ```bash
+    pytest
+    ```
+    Ensure `pytest` is installed (`pip install pytest`).  `pytest` will automatically discover and run all test files (`test_*.py`) in the `tests/` directory.  Review the test output to confirm all tests pass.
+
 
 ## Repository Structure
 
-*   `keywords4cv.py`: The main Python script.
-*   `config.yaml`:  The configuration file.
-*   `README.md`: This file.
-*   `output/`: (Created automatically) The directory for storing Excel output and log files.
-*   `requirements.txt` (Optional, but highly recommended): List of required packages.  Create with `pip freeze > requirements.txt`.
-* `tests/`: Directory for unit tests (recommended, but not included in this initial version).
-* `job_descriptions.json`: Example input file.
-* `ats_optimizer.log`: Log file.
+*   `keywords4cv.py`: The main Python script containing the core ATS optimization logic.
+*   `config.yaml`:  YAML configuration file for customizing stop words, skills whitelist, keyword categories, weighting, and other parameters.
+*   `README.md`: This file, providing documentation and usage instructions.
+*   `output/`: (Created automatically)  Directory where Excel output reports (`results.xlsx`) and log files (`ats_optimizer.log`) are saved by default.
+*   `requirements.txt`:  List of Python package dependencies.  It is recommended to update this file using `pip freeze > requirements.txt` after installing required packages.
+*   `tests/`: Directory containing unit tests:
+    *   `test_keywords4cv.py`: Python file containing unit tests written using `unittest` and `pytest` frameworks to verify the functionality of `keywords4cv.py`.
+*   `job_descriptions.json`: Example input JSON file demonstrating the expected input format for job descriptions.
+*   `ats_optimizer.log`: Log file where the script records informational messages, warnings, and errors during execution.
 
 ## Contributing
 
-Contributions are welcome!  Follow these steps:
+Contributions are welcome!  If you wish to contribute to the project, please follow these steps:
 
-1.  Fork the repository.
-2.  Create a new branch.
-3.  Make your changes and commit them.
-4.  Push your branch.
-5.  Submit a pull request.
+1.  Fork the repository to your GitHub account.
+2.  Create a new branch for your feature or bug fix.  Choose a descriptive branch name.
+3.  Make your code changes, ensuring they are well-commented and follow coding best practices.
+4.  Add or update unit tests in the `tests/` directory to cover your changes and ensure code reliability.
+5.  Run the unit tests locally using `pytest` from the `tests/` directory to confirm that all tests pass, including the ones you added.
+6.  Commit your changes to your branch with clear and informative commit messages.
+7.  Push your branch to your forked repository on GitHub.
+8.  Submit a pull request to the main repository, describing your changes and their purpose in detail.
 
 ## Licensing
 
