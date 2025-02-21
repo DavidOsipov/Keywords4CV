@@ -7,7 +7,6 @@ import sys  # For system-specific parameters and functions (exiting)
 from collections import OrderedDict  # For creating an LRU cache
 from typing import Dict, List, Set, Tuple, NamedTuple, Optional  # For type hinting
 from multiprocessing import (
-    Pool,
     TimeoutError as MPTimeoutError,
 )  # For parallel processing
 import concurrent.futures  # For multithreading category vector calculation
@@ -203,21 +202,18 @@ class EnhancedTextPreprocessor:
         ]  # Preprocess each text in the list
 
     def _process_doc_tokens(self, doc):
-        """Helper function to process tokens from a single spaCy doc.
-
-        Args:
-            doc: A spaCy Doc object.
-
-        Returns:
-            A list of lemmatized tokens.
-        """
         tokens = []
-        for token in doc:
-            if (
-                token.text in self.stop_words
-                or len(token.text) <= 1
-                or token.text.isnumeric()
-            ):
+        skill_spans = []
+        # First, add SKILL entity texts as tokens and record their spans.
+        for ent in doc.ents:
+            if ent.label_ == "SKILL":
+                tokens.append(ent.text)
+                skill_spans.append((ent.start, ent.end))
+        # Process remaining tokens that are not part of a SKILL entity.
+        for i, token in enumerate(doc):
+            if any(start <= i < end for start, end in skill_spans):
+                continue
+            if token.text.lower() in self.stop_words or len(token.text) <= 1 or token.text.isnumeric():
                 continue
             try:
                 lemma = token.lemma_.lower().strip()
@@ -354,71 +350,65 @@ class AdvancedKeywordExtractor:
                     )
         return synonyms  # Return the set of synonyms
 
+    # --- Improved _generate_ngrams function ---
     def _generate_ngrams(self, tokens: List[str], n: int) -> Set[str]:
-        """Generate n-grams from a list of tokens.
-
-        Args:
-            tokens: A list of tokens.
-            n: The length of the n-grams.
-
-        Returns:
-            A set of n-grams.
+        """Generate n-grams from tokens and exclude any n-grams that contain single-letter words.
+        
+        This extra filter ensures that even if a single-letter slips through tokenization,
+        the n-grams used for TF-IDF contain only valid multi-character words.
         """
+        # Remove any tokens that are empty after stripping whitespace.
         filtered_tokens = [
-            token for token in tokens if token.strip()
-        ]  # Filter out empty tokens
-        return {
+            token for token in tokens
+            if token.strip() and len(token.strip()) > 1 and token not in self.preprocessor.stop_words
+        ]
+        if len(filtered_tokens) < n:
+            return set()
+        # Generate all n-grams from the filtered tokens.
+        ngrams = {
             " ".join(filtered_tokens[i : i + n])
             for i in range(len(filtered_tokens) - n + 1)
-        }  # Generate and return n-grams
+            if all(len(word.strip()) > 1 for word in filtered_tokens[i : i + n])
+        }
+        return ngrams
 
     def extract_keywords(self, texts: List[str]) -> List[List[str]]:
-        """Extract keywords from a list of text strings.
-
-        Args:
-            texts: A list of text strings.
-
-        Returns:
-            A list of lists of keywords.
-        """
-        cleaned = self.preprocessor.preprocess_batch(
-            texts
-        )  # Preprocess the text strings
-        tokenized = self.preprocessor.tokenize_batch(
-            cleaned
-        )  # Tokenize the text strings
-        all_keywords = []  # Initialize the list of keywords
-        for tokens in tokenized:  # Iterate through the tokenized text strings
-            keywords = (
-                set()
-            )  # Initialize the set of keywords for the current text string
-            min_n = min(
-                self.whitelist_ngram_range[0], self.ngram_range[0]
-            )  # Get the minimum n-gram length
-            max_n = max(
-                self.whitelist_ngram_range[1], self.ngram_range[1]
-            )  # Get the maximum n-gram length
-            for n in range(min_n, max_n + 1):  # Iterate through the n-gram lengths
-                ngrams = self._generate_ngrams(
-                    tokens, n
-                )  # Generate n-grams from the tokens
-                if (
-                    n >= self.whitelist_ngram_range[0]
-                    and n <= self.whitelist_ngram_range[1]
-                ) or (
-                    n >= self.ngram_range[0] and n <= self.ngram_range[1]
-                ):  # Check if the n-gram length is within the valid range
-                    keywords.update(ngrams)  # Add the n-grams to the set of keywords
-            all_keywords.append(
-                list(keywords)
-            )  # Add the list of keywords to the list of all keywords
-        if self.config.get(
-            "semantic_validation", False
-        ):  # Check if semantic validation is enabled
-            return self._semantic_filter(
-                all_keywords, texts
-            )  # Apply semantic filtering
-        return all_keywords  # Return the list of all keywords
+        all_keywords = []
+        for text in texts:
+            doc = self.nlp(text)
+            # Extract preserved SKILL entities.
+            entity_keywords = [ent.text for ent in doc.ents if ent.label_ == "SKILL"]
+            
+            # Exclude SKILL entities from regular tokenization.
+            skill_spans = [(ent.start, ent.end) for ent in doc.ents if ent.label_ == "SKILL"]
+            non_entity_tokens = []
+            for i, token in enumerate(doc):
+                if any(start <= i < end for start, end in skill_spans):
+                    continue
+                non_entity_tokens.append(token.text)
+            
+            # Preprocess and split to get cleaned tokens.
+            preprocessed_text = self.preprocessor.preprocess(" ".join(non_entity_tokens))
+            token_list = preprocessed_text.split()
+            
+            non_entity_keywords = set()
+            # Generate n-grams only for non-entity tokens.
+            for n in range(self.ngram_range[0], self.ngram_range[1] + 1):
+                non_entity_keywords.update(self._generate_ngrams(token_list, n))
+            
+            # Combine entity and non-entity keywords.
+            keywords = set(entity_keywords) | non_entity_keywords
+            filtered_keywords = [
+                kw for kw in keywords
+                if len(kw.strip()) > 1
+                and not any(len(w.strip()) <= 1 for w in kw.split())
+                and not all(w in self.preprocessor.stop_words for w in kw.split())
+            ]
+            all_keywords.append(filtered_keywords)
+        
+        if self.config.get("semantic_validation", False):
+            return self._semantic_filter(all_keywords, texts)
+        return all_keywords
 
     def _semantic_filter(
         self, keyword_lists: List[List[str]], texts: List[str]
@@ -609,6 +599,11 @@ class ATSOptimizer:
             logger.warning(
                 "spaCy version <3.0 may have compatibility issues"
             )  # Warn if the spaCy version is too low
+
+        whitelisted_phrases = self.config.get("skills_whitelist", [])
+        if whitelisted_phrases and "entity_ruler" in self.nlp.pipe_names:
+            patterns = [{"label": "SKILL", "pattern": phrase} for phrase in whitelisted_phrases]
+            self.nlp.get_pipe("entity_ruler").add_patterns(patterns)
 
     def _add_entity_ruler(self):
         """Add an EntityRuler to the spaCy pipeline for section detection.
@@ -846,6 +841,8 @@ class ATSOptimizer:
             nlp = spacy.load(model_name, disable=["parser", "ner"])
             if "lemmatizer" not in nlp.pipe_names:
                 nlp.add_pipe("lemmatizer", config={"mode": "rule"})
+            if "sentencizer" not in nlp.pipe_names:
+                nlp.add_pipe("sentencizer")
             return nlp
         except OSError:
             return None
@@ -884,16 +881,16 @@ class ATSOptimizer:
             for attempt in range(retry_attempts + 1):
                 nlp = self._try_load_model(model)
                 if nlp:
+                    logger.debug(f"Loaded spaCy pipeline: {nlp.pipe_names}")
                     return nlp
                 logger.warning(
                     f"Model '{model}' not found. Attempt {attempt + 1}/{retry_attempts + 1}"
                 )
-                if (
-                    attempt < retry_attempts and model == model_name
-                ):  # Only download the specified model
+                if attempt < retry_attempts and model == model_name:
                     if self._download_model(model):
                         nlp = self._try_load_model(model)
                         if nlp:
+                            logger.debug(f"Loaded spaCy pipeline: {nlp.pipe_names}")
                             return nlp
                 time.sleep(2)  # Add a delay of 2 seconds between retries
 
@@ -926,31 +923,41 @@ class ATSOptimizer:
             })
         return results
 
+    # --- Improved _create_tfidf_matrix function ---
     def _create_tfidf_matrix(self, texts, keyword_sets):
-        """Create and fit the TF-IDF vectorizer and transform the keyword sets.
+        """Create and return a TF-IDF matrix for the job descriptions using pre-validated keyword sets.
 
-        Args:
-            texts: List of (preprocessed) job description texts.
-            keyword_sets: List of lists of keywords (one list per job description).
-
-        Returns:
-            A tuple containing:
-                - The document-term matrix (sparse matrix).
-                - The list of feature names
+        The vectorizer is adjusted to treat each document as a pre-tokenized list,
+        preserving multi-word keywords without re-tokenization. As an extra safety
+        measure, we also filter each document's keyword set to remove invalid tokens.
         """
         max_features = self.config.get("tfidf_max_features", 10000)
         vectorizer = TfidfVectorizer(
             ngram_range=self.keyword_extractor.ngram_range,
             lowercase=False,
+            # Use identity functions so that input is treated as pre-tokenized lists.
             tokenizer=lambda x: x,
             preprocessor=lambda x: x,
             max_features=max_features,
             dtype=np.float32,
         )
-        dtm = vectorizer.fit_transform([" ".join(kw) for kw in keyword_sets])
-        if len(vectorizer.get_feature_names_out()) == max_features:
+        # Validate each document's keyword set to discard any term that includes a word of length <=1.
+        validated_sets = [
+            [kw for kw in kw_set if all(len(word) > 1 for word in kw.split())]
+            for kw_set in keyword_sets
+        ]
+        logger.debug(f"Validated keyword sets sample: {validated_sets[:2]}")
+        try:
+            dtm = vectorizer.fit_transform(validated_sets)
+        except ValueError as e:
+            logger.error(f"TF-IDF vectorization failed: {e}. Check keyword_sets content.")
+            return None, []
+        feature_names = vectorizer.get_feature_names_out()
+        if len(feature_names) == max_features:
             logger.warning(f"TF-IDF vocabulary reached the limit of {max_features} features")
-        return dtm, vectorizer.get_feature_names_out()
+        if not feature_names.size:
+            logger.warning("No features extracted by TF-IDF. Check input keyword sets.")
+        return dtm, feature_names
 
     def analyze_jobs(self, job_descriptions: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Analyze job descriptions and extract keywords.
