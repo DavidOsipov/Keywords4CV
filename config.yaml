@@ -6,7 +6,17 @@ max_job_descriptions: 100
 default_category_name: "Other"
 min_desc_length: 50
 min_jobs: 2
+semantic_validation: True
+similarity_threshold: 0.65
+ngram_range: [1,2]
+whitelist_ngram_range: [1,2]
+spacy_model: "en_core_web_sm"
+cache_size: 1000
 
+weighting:
+  tfidf_weight: 0.7
+  frequency_weight: 0.3
+  whitelist_boost: 1.5
 
 section_headings:
   - responsibilities
@@ -886,14 +896,3 @@ keyword_categories:
     - requirements management
 
   Other: []  # Keywords that don't neatly fit into the above categories. Customize as needed.
-
-ngram_range: [1, 3]
-similarity_threshold: 0.6
-spacy_model: "en_core_web_sm"
-cache_size: 1000
-whitelist_ngram_range: [1, 3]
-
-weighting:
-  tfidf_weight: 0.7
-  frequency_weight: 0.3
-  whitelist_boost: 1.5
