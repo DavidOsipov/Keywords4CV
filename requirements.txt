@@ -9,5 +9,5 @@ pyarrow>=6.0.0
 xxhash>=3.0.0
 scipy>=1.7.0
 cachetools>=5.0.0
-srsly==2.4.6
+srsly==2.5.1
 rapidfuzz==3.6.1
