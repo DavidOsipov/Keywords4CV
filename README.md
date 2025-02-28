@@ -8,49 +8,87 @@ Keywords4CV is a Python-based tool designed to help job seekers optimize their r
 
 ## State of Production
 
-**Not ready! Under active development.**  
-Currently at version `0.09 (Alpha)`. While significant improvements have been made, critical issues persist (see Known Issues below), and the tool is not yet production-ready.
+**UNDER ACTIVE DEVELOPMENT - NOT CURRENTLY FUNCTIONAL**
 
-## Features
+Currently at version `0.24 (Alpha)`.  This is a pre-release version undergoing significant architectural changes.  **The script does *not* work correctly at this point in time.**  This README reflects the *intended* functionality of version 0.24, but critical issues remain.  See the Known Issues section below.
 
-*   **Enhanced Keyword Extraction:** Identifies key skills, qualifications, and terminology from job descriptions using advanced NLP techniques (spaCy, NLTK, scikit-learn). Now preserves multi-word skills (e.g., "machine learning") through entity recognition.
-*   **TF-IDF Analysis with Advanced Weighting:** Computes Term Frequency-Inverse Document Frequency (TF-IDF) scores, combined with *whitelist boosting* and *keyword frequency*. Configurable weights allow for fine-tuning keyword importance.
-*   **Synonym Expansion:** Leverages WordNet to suggest synonyms, expanding keyword coverage and improving semantic matching.
+## Features (Planned for v0.24 - Not Yet Fully Implemented)
+
+*   **Enhanced Keyword Extraction:** Identifies key skills, qualifications, and terminology from job descriptions using advanced NLP techniques (spaCy, NLTK, scikit-learn, rapidfuzz).
+    *   Preserves multi-word skills (e.g., "machine learning") through entity recognition.
+    *   **Fuzzy Matching:** Integrates `rapidfuzz` for flexible keyword matching, handling variations in spelling and phrasing.
+    *   **Phrase-Level Synonyms:** Supports synonyms for multi-word phrases, loaded from a static file or a REST API.
+    *   **Configurable Processing Order:**  Option to apply fuzzy matching before or after semantic validation.
+    *   **Trigram Optimization:** Uses a trigram cache to improve n-gram generation efficiency.
+    *   **Dynamic N-gram Generation:** Improved n-gram handling with robust error handling.
+*   **TF-IDF Analysis with Advanced Weighting:** Computes Term Frequency-Inverse Document Frequency (TF-IDF) scores, combined with *whitelist boosting*, *keyword frequency*, and *section weighting*. Configurable weights allow for fine-tuning keyword importance.
+*   **Synonym Expansion:** Leverages WordNet and, optionally, a REST API or static file to suggest synonyms, expanding keyword coverage and improving semantic matching.
+*   **Semantic Keyword Categorization:** Assigns keywords to categories using a hybrid approach:
+    *   Direct matching against pre-defined category terms.
+    *   Semantic similarity (cosine similarity between word vectors) for terms not directly matched.
+    *   Configurable `default_category` for uncategorized terms.
+    *   Caching for improved performance.
+*   **Contextual Validation:** Uses a configurable context window to determine if a keyword is used in a relevant context within the job description, reducing false positives.  Improved sentence splitting handles bullet points and numbered lists.
 *   **Highly Configurable:** Uses a `config.yaml` file for extensive customization:
-    *   Stop words (with options to add and exclude specific words). More comprehensive default stop word list.
-    *   Skills whitelist: Extensive and customizable whitelist of technical and soft skills, now integrated into spaCy entity ruler for better preservation.
-    *   Keyword categories and semantic categorization: Group keywords into meaningful categories (e.g., "Technical Skills", "Soft Skills") with improved semantic accuracy via word vectors.
-    *   N-gram range: Adjusted to `[1, 2]` in `0.09` for concise, actionable phrases (configurable).
-    *   Similarity threshold: Increased to `0.65` in `0.09` for stricter semantic categorization (configurable).
-    *   Weighting for TF-IDF, frequency, and whitelist boost: Customize the scoring mechanism.
-    *   Description length limits and job count thresholds: Configure input validation rules.
-    *   Semantic validation: Enabled by default in `0.09` to filter keywords by context.
+    *   **Validation:** Settings for input validation (e.g., allowing numeric titles, handling empty descriptions).
+    *   **Dataset:** Parameters for controlling dataset processing (e.g., minimum/maximum job descriptions, short description threshold).
+    *   **Text Processing:**
+        *   spaCy model selection and pipeline component configuration.
+        *   N-gram ranges (for general keywords and the whitelist).
+        *   POS tag filtering.
+        *   Semantic validation settings (enabled/disabled, similarity threshold).
+        *   Synonym source (static file or API) and related settings.
+        *   Context window size.
+        *   Fuzzy matching order (before/after semantic validation).
+    *   **Categorization:** Default category, categorization cache size, direct match threshold.
+    *   **Whitelist:** Whitelist recall threshold, caching options, fuzzy matching settings (algorithm, minimum similarity, allowed POS tags).
+    *   **Weighting:** Weights for TF-IDF, frequency, whitelist boost, and section-specific weights.
+    *   **Hardware Limits:**  GPU usage, batch size, memory thresholds, maximum workers, memory scaling factor.
+    *   **Optimization:** Settings for reinforcement learning (Q-learning) based parameter tuning, including reward weights, learning rate, and complexity factors.
+    *   **Caching:** Cache sizes for various components (general cache, TF-IDF max features, trigram cache).  Includes a `cache_salt` for cache invalidation.
+    *   **Intermediate Save:** Options for saving intermediate results (enabled/disabled, save interval, format, working directory, cleanup).
+    *   **Advanced:**  Dask integration (currently disabled), success rate threshold, checksum relative tolerance, negative keywords, section headings.
+    *   Stop words (with options to add and exclude specific words).
+    *   Extensive and customizable whitelist of technical and soft skills.
+    *   Keyword categories.
 *   **Detailed Output Reports:** Generates comprehensive Excel reports:
     *   **Keyword Summary:** Aggregated keyword scores, job counts, average scores, and assigned categories for a high-level overview.
-    *   **Job Specific Details:** Detailed table (formerly pivot) showing keyword scores, TF-IDF, frequency, category, and whitelist status per job title.
-*   **Robust Input Validation:** Rigorous validation of job descriptions, handling empty titles, descriptions, incorrect data types, and encoding issues. Clear error messages and logging.
+    *   **Job Specific Details:** Detailed table showing keyword scores, TF-IDF, frequency, category, whitelist status, and other relevant information per job title.
+*   **Robust Input Validation:** Rigorous validation of job descriptions and configuration parameters, handling empty titles, descriptions, incorrect data types, encoding issues, and invalid configuration values.  Clear error messages and logging.
 *   **User-Friendly Command-Line Interface:** `argparse` provides a clear and easy-to-use interface.
-*   **Comprehensive Error Handling and Logging:** Detailed logging to `ats_optimizer.log` with improved error handling for configuration, input, and memory issues.
-*   **Multiprocessing for Robust Analysis:** Core analysis uses multiprocessing for stability and timeout control.
-*   **Efficient Caching:** Uses `functools.lru_cache` and `OrderedDict` to optimize performance, with cache invalidation on config changes.
-*   **SpaCy Pipeline Optimization:** Disables unnecessary components (`parser`, `ner`) and adds `sentencizer` for efficiency and consistency.
-*   **Automatic NLTK Resource Management:** Ensures WordNet and other resources are downloaded if missing.
-*   **Memory Management and Chunking:** Adaptive chunking and memory monitoring prevent memory errors for large datasets.
-*   **Extensive Unit Testing:** Includes a test suite in `tests/`, though currently unreliable (see Known Issues).
+*   **Comprehensive Error Handling and Logging:** Detailed logging to `Keywords4CV.log` with improved error handling for configuration, input, memory issues, API calls, data integrity, and other potential problems.  Custom exceptions are used for specific error types.
+*   **Multiprocessing for Parallel Processing:** Core analysis uses `concurrent.futures.ProcessPoolExecutor` for parallel processing, significantly improving performance.
+*   **Efficient Caching:** Uses `functools.lru_cache`, `cachetools.LRUCache`, and custom caching mechanisms to optimize performance, with cache invalidation on configuration changes.
+*   **SpaCy Pipeline Optimization:** Dynamically enables and disables spaCy pipeline components based on configuration, improving efficiency.
+*   **Automatic NLTK Resource Management:** Ensures WordNet and other NLTK resources are downloaded if missing.
+*   **Memory Management and Adaptive Chunking:**
+    *   **Smart Chunker:** Uses a Q-learning algorithm to dynamically adjust the chunk size based on dataset statistics and system resource usage.
+    *   **Auto Tuner:** Automatically adjusts parameters (e.g., `chunk_size`, `pos_processing`) based on metrics and trigram cache hit rate.
+    *   **Memory Monitoring:** Monitors memory usage and clears caches if necessary.
+    *   **Explicit Garbage Collection:**  Releases memory proactively.
+*   **Intermediate Result Saving and Checkpointing:**  Saves intermediate results to disk in configurable formats (feather, jsonl, json) with checksum verification to ensure data integrity.  This allows for resuming processing and prevents data loss.
+* **Streaming Data Aggregation:** Uses a generator-based approach to aggregate results from intermediate files, enabling processing of very large datasets.
 
-## How it Works
+## How it Works (Planned for v0.24)
 
-1.  **Input:** Accepts a JSON file (e.g., `job_descriptions.json`) with job titles as keys and descriptions as values.
-2.  **Preprocessing:** Cleans text (lowercasing, URL/email removal), tokenizes, lemmatizes, and caches results.
-3.  **Keyword Extraction:** 
-    *   Matches `skills_whitelist` phrases as `SKILL` entities using spaCy.
-    *   Generates n-grams (default `[1, 2]` in `0.09`) and filters out noise (single-letter tokens, stop words).
-    *   Expands with WordNet synonyms.
-4.  **Keyword Weighting and Scoring:** Combines TF-IDF, frequency, and whitelist boost (configurable weights).
-5.  **Semantic Keyword Categorization:** Assigns categories using substring matching and semantic similarity (threshold `0.65` in `0.09`).
-6.  **Output Generation:** Produces Excel reports:
+1.  **Input:** Accepts a JSON file (e.g., `job_descriptions.json`) with job titles as keys and descriptions as values.  Also uses a `config.yaml` file for configuration.
+2.  **Configuration Validation:**  Validates the structure and content of the `config.yaml` file using `schema` and Pydantic.
+3.  **Preprocessing:** Cleans text (lowercasing, URL/email removal), tokenizes, lemmatizes, and caches results.
+4.  **Keyword Extraction:**
+    *   Matches `keyword_categories` phrases as `SKILL` entities using spaCy's `entity_ruler`.
+    *   Generates n-grams (configurable range).
+    *   Filters out noisy n-grams (containing stop words or single characters).
+    *   Expands keywords with synonyms (from WordNet, a static file, or a REST API).
+    *   Applies fuzzy matching (using `rapidfuzz`) against the expanded set of skills.
+    *   Performs semantic validation, checking if keywords are used in context.
+5.  **Keyword Weighting and Scoring:** Combines TF-IDF, frequency, whitelist boost, and section weighting (configurable weights).
+6.  **Keyword Categorization:** Assigns categories using a hybrid approach (direct match + semantic similarity).
+7.  **Intermediate Saving (Optional):** Saves intermediate results (summary and detailed scores) to disk in a configurable format (feather, jsonl, or json) with checksum verification.
+8.  **Adaptive Parameter Tuning:**  Uses reinforcement learning (Q-learning) to dynamically adjust parameters (e.g., chunk size, POS processing strategy) based on performance metrics.
+9.  **Result Aggregation:**  Combines intermediate results (if any) into final summary and detailed DataFrames.
+10. **Output Generation:** Produces Excel reports:
     *   **Summary:** Ranked keywords with `Total_Score`, `Avg_Score`, `Job_Count`.
-    *   **Detailed Scores:** Per-job details including `Score`, `TF-IDF`, `Frequency`, `Category`, `In Whitelist`.
+    *   **Detailed Scores:** Per-job details including `Score`, `TF-IDF`, `Frequency`, `Category`, `In Whitelist`, and other information.
 
 ## Getting Started
 
@@ -59,12 +97,13 @@ Currently at version `0.09 (Alpha)`. While significant improvements have been ma
 *   Python 3.8+
 *   Required libraries:
     ```bash
-    pip install pandas nltk spacy scikit-learn pyyaml psutil pytest
+    pip install pandas nltk spacy scikit-learn pyyaml psutil requests rapidfuzz srsly xxhash cachetools pydantic schema pyarrow numpy
     ```
 *   SpaCy model:
     ```bash
-    python -m spacy download en_core_web_sm
+    python -m spacy download en_core_web_lg
     ```
+    (or another suitable spaCy model, specified in `config.yaml`)
 
 ### Installation
 
@@ -91,43 +130,52 @@ Currently at version `0.09 (Alpha)`. While significant improvements have been ma
       "Software Engineer": "Proficient in Java, Spring, REST APIs..."
     }
     ```
-2.  **Customize `config.yaml`:** Adjust `skills_whitelist`, `ngram_range`, `similarity_threshold`, etc.
-3.  **Run the Script:**
+2.  **Customize `config.yaml`:**  **Thoroughly review and adjust the `config.yaml` file.**  This is crucial for the script's behavior.  Pay particular attention to:
+    *   `keyword_categories`: Define your skill categories and list relevant keywords for each.
+    *   `text_processing`: Configure spaCy model, n-gram ranges, synonym settings, fuzzy matching, and contextual validation.
+    *   `whitelist`: Adjust fuzzy matching parameters.
+    *   `weighting`:  Set weights for TF-IDF, frequency, whitelist boost, and section weights.
+    *   `hardware_limits`:  Configure memory usage and processing limits.
+    *   `optimization`:  Tune reinforcement learning parameters (if desired).
+    *   `intermediate_save`:  Enable/disable intermediate saving and configure related options.
+3.  **(Optional) Create `synonyms.json`:** If using static phrase synonyms, create a `synonyms.json` file:
+    ```json
+    {
+      "product management": ["product leadership", "product ownership"],
+      "machine learning": ["ml", "ai"]
+    }
+    ```
+4.  **Run the Script:**
     ```bash
     python keywords4cv.py -i job_descriptions.json -c config.yaml -o results.xlsx
     ```
-4.  **Review Output:** Check `results.xlsx` and `ats_optimizer.log`.
+5.  **Review Output:** Check `results.xlsx` and `Keywords4CV.log`.
 
-### Running Unit Tests
+## Known Issues (Version 0.24)
 
-```bash
-cd tests
-pytest
-```
-**Note:** Tests are currently unreliable (see Known Issues).
-
-## Known Issues (Version 0.09)
-- **Incorrect Keyword Display:** Summary shows single-word keywords with uniform scores (e.g., `1.42192903`), missing multi-word phrases from `skills_whitelist`.
-- **Unreliable Unit Tests:** Test suite fails consistently and lacks coverage.
-- **Whitelist Inconsistency:** Many whitelisted terms marked `FALSE` in output.
-- **Low TF-IDF Variance:** Scores lack differentiation, possibly due to scoring bugs.
+**NOTE! At this point of time, the script doesn't work. This release aims to introduce critical architectural changes.**  This is an alpha release and is not yet functional.
 
 ## Repository Structure
 
-*   `keywords4cv.py`: Main script.
-*   `config.yaml`: Configuration file.
+*   `keywords4cv_0.24.py.txt`: Main script.
+*   `config.yaml.truncated.txt`: Configuration file (example - you'll need to adapt this).
 *   `README.md`: This documentation.
-*   `output/`: Auto-generated for `results.xlsx` and `ats_optimizer.log`.
+*   `exceptions.py.txt`: Custom exception definitions.
+*   `config_validation.py.txt`: Configuration validation logic.
 *   `requirements.txt`: Dependency list (update with `pip freeze > requirements.txt`).
-*   `tests/`: Unit tests (currently unreliable).
 *   `job_descriptions.json`: Sample input.
+*   `synonyms.json`: (Optional) Static phrase synonyms.
+* `working_dir`: (Created by the script) Stores intermediate files.
 
 ## Contributing
 
-1. Fork, create a branch, and make changes.
-2. Update/add tests in `tests/`.
-3. Run `pytest` (despite issues) and commit.
-4. Submit a pull request with detailed description.
+1.  Fork the repository.
+2.  Create a new branch for your feature or bug fix.
+3.  Make your changes.
+4.  Add or update tests as needed.
+5.  Run the tests and ensure they pass.
+6.  Commit your changes with clear commit messages.
+7.  Submit a pull request.
 
 ## Licensing
 
@@ -146,10 +194,10 @@ This work is licensed under a
 
 While the CC BY-NC-SA 4.0 license is generally used for creative works, it is being used here to specifically restrict the commercial use of this software by others while allowing non-commercial use, modification, and sharing. The author chose this license to foster a community of non-commercial users and contributors while retaining the right to commercialize the software themselves.
 
-**Please be aware that this license is not a standard software license and may not address all software-specific legal concerns.**  Specifically:
+**Please be aware that this license is not a standard software license and may not address all software-specific legal concerns.** Specifically:
 
 *   **No Patent Grant:** This license does *not* grant any patent rights related to the software.
-*   **Disclaimer of Warranties:**  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*   **Disclaimer of Warranties:** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 *   **Consult Legal Counsel:** If you have any concerns about the legal implications of using this software under the CC BY-NC-SA 4.0 license, especially regarding patent rights or commercial use, you should consult with legal counsel.
 
 By using, modifying, or distributing this software, you agree to the terms of the CC BY-NC-SA 4.0 license, including the limitations and disclaimers stated above.
