@@ -25,6 +25,10 @@ except ImportError as exc:
         "The 'schema' package is required. Install it with 'pip install schema'"
     ) from exc
 
+import yaml
+import sys
+from pathlib import Path
+
 
 class ConfigError(Exception):
     """Custom exception for configuration errors."""
@@ -464,3 +468,59 @@ def validate_config(config: Dict[str, Any]) -> None:
     )
     if not has_keywords:
         raise ConfigError("At least one category must contain keywords")
+
+
+def validate_config_file(config_path: str) -> Dict:
+    """
+    Loads and validates a configuration file from the given path.
+
+    This function handles the complete loading and validation workflow:
+    1. Reads the YAML configuration file
+    2. Validates its structure using Schema
+    3. Performs runtime validation using Pydantic
+
+    Args:
+        config_path: Path to the configuration YAML file.
+
+    Returns:
+        Dict: Validated configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the config file doesn't exist.
+        yaml.YAMLError: If the YAML syntax is invalid.
+        ConfigError: If the configuration content is invalid.
+        ValidationError: If Pydantic validation fails.
+    """
+    try:
+        config_path = Path(config_path)
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw_config = yaml.safe_load(f)
+
+        if not isinstance(raw_config, dict):
+            raise ConfigError(
+                f"Configuration file must contain a YAML dictionary/object, found {type(raw_config).__name__}"
+            )
+
+        # Validate the configuration
+        validate_config(raw_config)
+
+        # Convert to Pydantic model and back to dict
+        config = Config(**raw_config)
+        return config.dict(by_alias=True)  # Use alias for serialization
+
+    except FileNotFoundError:
+        logger.error("Config file not found: %s", config_path)
+        raise
+    except yaml.YAMLError as e:
+        # Detailed YAML error information
+        line_info = ""
+        if hasattr(e, "problem_mark"):
+            line_info = f" at line {e.problem_mark.line + 1}, column {e.problem_mark.column + 1}"
+        logger.error(f"YAML syntax error in config file {config_path}{line_info}: {e}")
+        raise
+    except (SchemaError, ValidationError) as e:
+        # Schema and Pydantic validation errors are already handled in validate_config
+        raise ConfigError(f"Configuration validation failed: {e}") from e
+    except Exception as e:
+        logger.exception("Unexpected error loading config from %s: %s", config_path, e)
+        raise ConfigError(f"Unexpected error loading configuration: {e}") from e
