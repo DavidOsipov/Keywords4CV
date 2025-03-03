@@ -104,6 +104,8 @@ See the separate `CHANGELOG.md` file for a detailed list of changes.  This relea
 9.  **Result Aggregation:** Combines intermediate results (if any) into final summary and detailed DataFrames.
 10. **Output Generation:** Produces Excel reports and, optionally, a comprehensive metrics report (HTML with visualizations).
 
+[Much more detailed description here](https://github.com/DavidOsipov/Keywords4CV/wiki/How-script-v0.26-works)
+
 ## Getting Started
 
 ### Prerequisites
