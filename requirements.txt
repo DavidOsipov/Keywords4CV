@@ -12,5 +12,5 @@ cachetools==5.0.0
 srsly==2.5.1
 rapidfuzz==3.12.2
 tenacity==8.0.0
-pydantic==2.10,<3
+pydantic==2.10.6,<3
 pybktree==1.0.3
