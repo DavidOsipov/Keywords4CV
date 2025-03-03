@@ -1,15 +1,24 @@
-# Version 0.24
+# Version 0.26
 
+# Standard library imports
 import argparse
+import concurrent.futures
+import gc
 import json
 import logging
+import os
+import random
 import re
+import shutil
 import sys
 import time
-import random
-import gc
-import shutil
+import torch
 from collections import OrderedDict, deque, defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from functools import lru_cache
+from itertools import product
+from multiprocessing import TimeoutError as MPTimeoutError
+from pathlib import Path
 from typing import (
     Dict,
     List,
@@ -22,41 +31,72 @@ from typing import (
     Literal,
 )
 
-# Import the new exceptions module
+# Third-party imports
+import nltk
+import numpy as np
+import pandas as pd
+import psutil
+import requests
+import spacy
+import srsly
+import yaml
+import xxhash
+from cachetools import LRUCache
+from nltk.corpus import wordnet as wn
+from pydantic import BaseModel, Field, ValidationError, field_validator, conlist
+from pyarrow import feather
+import pyarrow as pa
+import pyarrow.parquet as pq
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+import pybktree
+from Levenshtein import distance
+from rapidfuzz import fuzz
+from sklearn.feature_extraction.text import TfidfVectorizer, HashingVectorizer
+import scipy.sparse as sparse
+
+# First-party/local imports
 from exceptions import (
     ConfigError,
     InputValidationError,
-    CriticalFailureError,
-    AggregationError,
     DataIntegrityError,
+    AuthenticationError,
+    NetworkError,
+    APIError,
 )
-from pathlib import Path
-from functools import lru_cache
-from multiprocessing import TimeoutError as MPTimeoutError, current_process
-import concurrent.futures
-from concurrent.futures import ProcessPoolExecutor
+import tempfile
+import os
+import structlog
 
-import nltk
-import pandas as pd
-import spacy
-import yaml
-import numpy as np
-import psutil
-import requests
-from sklearn.feature_extraction.text import TfidfVectorizer
-from rapidfuzz import process, fuzz
-import srsly
-import xxhash
-from nltk.corpus import wordnet as wn
-from itertools import product
-from cachetools import LRUCache
-from pydantic import BaseModel, Field, ValidationError, field_validator, conlist
-import pyarrow.feather as feather  # Added import for pyarrow.feather
-import pyarrow as pa
-import pyarrow.parquet as pq
-import os  # Ensure os is imported for environment variable access
+# Add imports for our new modules
+from cache_manager import CacheManager, MemoryCacheBackend
+from circuit_breaker import SimpleCircuitBreaker, CircuitOpenError
+from semantic_validator import SemanticValidator
 
-logger = logging.getLogger(__name__)
+# Configure structlog
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.processors.JSONRenderer(),  # Or another renderer
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
 
 # --- Sub-Models (for nested structures) ---
 
@@ -122,6 +162,10 @@ class TextProcessingConfig(BaseModel):
     fuzzy_before_semantic: bool = (
         True  # Default to fuzzy matching before semantic validation
     )
+    # Add wordnet_similarity_threshold for synonym filtering
+    wordnet_similarity_threshold: int = Field(
+        80, ge=0, le=100
+    )  # Default to 80% similarity threshold
 
     @field_validator("ngram_range", "whitelist_ngram_range")
     @classmethod
@@ -426,17 +470,21 @@ class Config(BaseModel):
 def load_config(config_path: str) -> Dict:
     """Loads and validates the configuration from the given path."""
     try:
-        config_path = Path(config_path)
-        with open(config_path, "r", encoding="utf-8") as f:
-            raw_config = yaml.safe_load(f)
+        # Import here to avoid circular imports
+        from config_validation import validate_config_file
 
-        # Validate and convert to a dictionary
-        config = Config(**raw_config)
-        return config.dict(by_alias=True)  # Use alias for serialization
+        # Use the dedicated function from config_validation module
+        return validate_config_file(config_path)
 
     except FileNotFoundError:
         logger.error("Config file not found: %s", config_path)
         sys.exit(78)  # Configuration error exit code
+    except yaml.YAMLError as e:
+        line_info = ""
+        if hasattr(e, "problem_mark"):
+            line_info = f" at line {e.problem_mark.line + 1}, column {e.problem_mark.column + 1}"
+        logger.error(f"YAML syntax error in config file {config_path}{line_info}: {e}")
+        sys.exit(78)
     except ValidationError as e:
         logger.error("Configuration validation error:\n%s", e)
         sys.exit(78)
@@ -502,138 +550,154 @@ class EnhancedTextPreprocessor:
         self.config = config
         self.nlp = nlp
         self.stop_words = self._load_stop_words()
+        # Use more granular regex patterns for better control
         self.regex_patterns = {
             "url": re.compile(r"http\S+|www\.\S+"),
             "email": re.compile(r"\S+@\S+"),
             "special_chars": re.compile(r"[^\w\s'\-]"),
             "whitespace": re.compile(r"\s+"),
         }
-        self._cache = OrderedDict()
+        
+        # Calculate dynamic cache size based on available memory
         base_cache_size = self.config["caching"].get("cache_size", 5000)
-
-        # Fix: Consistently access memory_scaling_factor from hardware_limits
-        scaling_factor = self.config["hardware_limits"].get(
-            "memory_scaling_factor", 0.3
-        )
-
+        scaling_factor = self.config["hardware_limits"].get("memory_scaling_factor", 0.3)
+        
         if scaling_factor:
             available_mb = psutil.virtual_memory().available / (1024 * 1024)
             dynamic_size = int(available_mb / scaling_factor)
             self._CACHE_SIZE = min(base_cache_size, dynamic_size)
         else:
             self._CACHE_SIZE = base_cache_size
-        self.config_hash = None
-        self._update_config_hash()
+            
+        # Use cachetools.LRUCache instead of OrderedDict for better performance
+        self._cache = LRUCache(maxsize=self._CACHE_SIZE)
+        self.cache_salt = get_cache_salt(config)
+        self.config_hash = self._calculate_config_hash()
         self.pos_processing = self.config["text_processing"].get("pos_processing", "")
-        self.cache_salt = get_cache_salt(
-            self.config
-        )  # Get cache salt with proper priority
-
-    def _update_config_hash(self):
-        new_hash = self._calculate_config_hash()
-        if new_hash != self.config_hash:
-            self.config_hash = new_hash
-            self._cache.clear()
 
     def _calculate_config_hash(self) -> str:
+        """Calculate a comprehensive hash of all relevant configuration parameters."""
+        # Include more relevant configuration parameters
         relevant_config = {
             "stop_words": self.config.get("stop_words", []),
             "stop_words_add": self.config.get("stop_words_add", []),
             "stop_words_exclude": self.config.get("stop_words_exclude", []),
-            "keyword_categories": self.config.get(
-                "keyword_categories", {}
-            ),  # Add keyword categories
+            "text_processing": self.config.get("text_processing", {}),
+            "caching": self.config.get("caching", {}),
+            "validation": self.config.get("validation", {})
         }
         config_str = json.dumps(relevant_config, sort_keys=True)
         # Use self.cache_salt to salt the hash
-        return xxhash.xxh3_64(
-            f"{self.cache_salt}_{config_str}".encode("utf-8")
-        ).hexdigest()
-
-    def _load_stop_words(self) -> Set[str]:
-        stop_words = set(self.config.get("stop_words", []))
-        stop_words.update(self.config.get("stop_words_add", []))
-        stop_words.difference_update(self.config.get("stop_words_exclude", []))
-
-        if len(stop_words) < 50:
-            logger.warning(
-                "Stop words list seems unusually small (less than 50 words). Consider adding more stop words to improve text preprocessing."
-            )
-        return stop_words
+        return xxhash.xxh3_64(f"{self.cache_salt}_{config_str}".encode("utf-8")).hexdigest()
 
     def preprocess(self, text: str) -> str:
-        self._update_config_hash()
-        # Use self.cache_salt to salt the text hash
+        """Preprocess text with instance-specific caching."""
+        # Check if config has changed and invalidate cache if needed
+        current_hash = self._calculate_config_hash()
+        if (current_hash != self.config_hash):
+            self._cache.clear()
+            self.config_hash = current_hash
+            
+        # Create cache key with salt
         text_hash = f"{CACHE_VERSION}_{xxhash.xxh3_64((self.cache_salt + text).encode()).hexdigest()}"
+        
         if text_hash in self._cache:
-            self._cache.move_to_end(text_hash)
             return self._cache[text_hash]
 
-        cleaned = text.lower()
-        cleaned = self.regex_patterns["url"].sub("", cleaned)
-        cleaned = self.regex_patterns["email"].sub("", cleaned)
+        # Use separate regex patterns for more precise text cleaning
+        cleaned = text.casefold()
+        cleaned = self.regex_patterns["url"].sub(" ", cleaned)
+        cleaned = self.regex_patterns["email"].sub(" ", cleaned)
         cleaned = self.regex_patterns["special_chars"].sub(" ", cleaned)
         cleaned = self.regex_patterns["whitespace"].sub(" ", cleaned).strip()
-
-        while len(self._cache) >= self._CACHE_SIZE:
-            self._cache.popitem(last=False)
-
-        self._cache[text_hash] = cleaned
         return cleaned
 
     def preprocess_batch(self, texts: List[str]) -> List[str]:
         return [self.preprocess(text) for text in texts]
 
     def _process_doc_tokens(self, doc):
-        tokens = [ent.text.lower() for ent in doc.ents if ent.label_ == "SKILL"]
-        skill_spans = [
-            (ent.start, ent.end) for ent in doc.ents if ent.label_ == "SKILL"
-        ]
+        """
+        Extract tokens from a spaCy document with ultra-optimized processing.
+        
+        Args:
+            doc: spaCy Doc object to process
+            
+        Returns:
+            List[str]: Unique processed tokens
+        """
+        # Pre-cache config parameters for maximum performance
+        pos_filter = set(self.config["text_processing"].get("pos_filter", ["NOUN", "PROPN", "ADJ"]))
+        min_len = max(2, self.config["validation"].get("title_min_length", 2))
+        stop_words = self.preprocessor.stop_words
+        
+        # Use a set from the start for O(1) insertion and automatic deduplication
+        token_set = set()
+        
+        # Phase 1: Extract entities first - use set for faster lookups in span checking
+        skill_spans = {(ent.start, ent.end) for ent in doc.ents if ent.label_ == "SKILL"}
+        
+        # Add skill entities directly using set.update for better performance
+        token_set.update(ent.text.lower() for ent in doc.ents if ent.label_ == "SKILL")
+        
+        # Phase 2: Process non-entity tokens with POS filtering
         for i, token in enumerate(doc):
+            # Skip tokens that are part of skill entities - avoid duplicate processing
             if any(start <= i < end for start, end in skill_spans):
                 continue
-            if len(token.strip()) > 1 and token not in self.preprocessor.stop_words:
-                tokens.append(token.lemma_.lower())
-        return list(set(tokens))  # Deduplicate for efficiency
+                
+            # Skip tokens with unwanted POS - do this early to avoid unnecessary processing
+            if token.pos_ not in pos_filter:
+                continue
+                
+            # Get lowercase text once for reuse in multiple checks
+            text_lower = token.text.lower()
+                
+            # Skip stop words - check both spaCy's is_stop and our custom stop_words
+            if token.is_stop or text_lower in stop_words:
+                continue
+                
+            # Apply minimum length filter before more expensive operations
+            if len(token.text) < min_len:
+                continue
+            
+            # Process hyphenated terms with improved validation
+            if '-' in token.text:
+                parts = token.text.split('-')
+                for part in parts:
+                    part_lower = part.lower()
+                    # Only add parts that meet length and aren't stop words
+                    if len(part) >= min_len and part_lower not in stop_words:
+                        token_set.add(part_lower)
+            else:
+                # Add lemmatized token with length validation
+                lemma = token.lemma_.lower()
+                if len(lemma) >= min_len:
+                    token_set.add(lemma)
+        
+        # Final validation to ensure all tokens meet minimum length
+        return [token for token in token_set if len(token) >= min_len]
 
     def tokenize_batch(self, texts: List[str]) -> Generator[List[str], None, None]:
-        """Tokenizes a batch of texts using spaCy.
-
-        Uses nlp.pipe for efficient batch processing, and dynamically enables
-        components. Employs a generator for memory efficiency.
-
-        Args:
-            texts: A list of text strings.
-
-        Yields:
-            A list of tokens for each input text.
-        """
-        batch_size = self.config["hardware_limits"].get("batch_size", 64)
-        # Use configured max_workers, but ensure it's at least 1
-        max_workers = max(1, self.config["hardware_limits"].get("max_workers", 1))
-
-        enabled_pipes = self.config["text_processing"]["spacy_pipeline"].get(
-            "enabled_components", []
-        )
-        if not enabled_pipes:
-            enabled_pipes = ["tok2vec", "tagger", "lemmatizer", "entity_ruler"]
-
-        try:
-            with self.nlp.select_pipes(enable=enabled_pipes):
-                for i, doc in enumerate(
-                    self.nlp.pipe(texts, batch_size=batch_size, n_process=max_workers)
-                ):
-                    try:
-                        yield self._process_doc_tokens(doc)
-                        del doc  # Explicitly release memory after processing EACH doc
-                    except (ValueError, AttributeError, RuntimeError, TypeError) as e:
-                        logger.error("Error tokenizing text #%s: %s", i, e)
-                        yield []  # Return empty token list as fallback
-
-        except (ValueError, IOError, RuntimeError, OSError) as e:
-            logger.exception("Error during tokenization batch process: %s", e)
-            for _ in texts:  # Still yield something for each input text
-                yield []
+        # Add custom stop words from config
+        custom_stop_words = self.config.get("stop_words", [])
+        stop_words.update([w.lower() for w in custom_stop_words])
+        
+        # Add additional stop words specified in config
+        additional_stop_words = self.config.get("stop_words_add", [])
+        if additional_stop_words:
+            stop_words.update([w.lower() for w in additional_stop_words])
+        
+        # Remove any stop words that are meant to be excluded
+        excluded_stop_words = self.config.get("stop_words_exclude", [])
+        if excluded_stop_words:
+            stop_words = stop_words - set([w.lower() for w in excluded_stop_words])
+        
+        if len(stop_words) < 50:
+            logger.warning(
+                "Stop words list seems unusually small (less than 50 words). Consider adding more stop words to improve text preprocessing."
+            )
+            
+        return stop_words
 
 
 def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
@@ -668,31 +732,171 @@ class AdvancedKeywordExtractor:
         "ADV": wn.ADV,
     }
 
-    def __init__(self, config: Dict, nlp):
+    def __init__(self, config: Dict, nlp, preprocessor=None):
         self.config = config
         self.nlp = nlp
+        self.preprocessor = preprocessor or EnhancedTextPreprocessor(config, nlp)
         self.phrase_synonyms = self._load_phrase_synonyms()
-        self.api_cache: Dict[str, List[str]] = {}
+        
+        # Create primary cache manager with configurable size
+        cache_size = config["caching"].get("cache_size", 5000)
+        self.cache_manager = CacheManager(
+            backend=MemoryCacheBackend(maxsize=cache_size),
+            namespace="api_synonyms"  # Keep original namespace for compatibility
+        )
+
+        # Create specialized caches for specific use cases with appropriate sizing
+        term_cache_size = config["caching"].get("term_cache_size", 5000)
+        self.term_processing_cache = CacheManager(
+            backend=MemoryCacheBackend(maxsize=term_cache_size),
+            namespace="term_processing"
+        )
+
+        # Keep api_cache for backward compatibility
+        self.api_cache = {}
+        
+        # Add cache stats collection for performance monitoring
+        self.cache_stats = {"api_hits": 0, "api_misses": 0, "term_hits": 0, "term_misses": 0}
+        
+        # Initialize circuit breaker
+        self.api_circuit_breaker = SimpleCircuitBreaker(
+            failure_threshold=config.get("api", {}).get("failure_threshold", 5),
+            recovery_timeout=config.get("api", {}).get("recovery_timeout", 60)
+        )
+        
         self.all_skills = self._load_and_process_all_skills()
-        self.preprocessor = EnhancedTextPreprocessor(config, nlp)
-        self.category_vectors = {}
-        self.ngram_range = self.config["text_processing"].get("ngram_range", [1, 3])
-        self._section_heading_re = re.compile(
-            r"^(?:"
-            + "|".join(
-                re.escape(heading)
-                for heading in self.config["advanced"].get("section_headings", [])
-            )
-            + r")(?:\s*:)?",
-            re.MULTILINE | re.IGNORECASE,
-        )
-        self.default_category = config["categorization"].get(
-            "default_category", "Other"
-        )
         self.category_vectors = {}
         self.cache_size = self.config["caching"].get("cache_size", 5000)
+        self.bk_tree = self._build_enhanced_bk_tree()  # Build the enhanced BK-tree
+        
+        # Initialize the validator
+        self.validator = SemanticValidator(config, nlp)
 
-    @lru_cache(maxsize=1)  # Cache the validated synonyms
+    def _build_enhanced_bk_tree(self):
+        """
+        Builds memory-aware enhanced BK-tree with adaptive caching for efficient fuzzy matching.
+        
+        Returns:
+            EnhancedBKTree: An enhanced BK-tree for fuzzy matching
+        """
+        # Import the EnhancedBKTree class
+        from bk_tree_enhancement import EnhancedBKTree
+        
+        # Validate input before processing
+        if not self.all_skills:
+            logger.warning("Empty skills list for BK-tree initialization")
+            return EnhancedBKTree([])
+        
+        try:
+            # Get minimum length from config with fallback
+            min_length = self.config.get("validation", {}).get("title_min_length", 2)
+            
+            # Normalize skills with casefold for better Unicode handling and filter by length
+            normalized_skills = [
+                skill.strip().casefold() 
+                for skill in self.all_skills 
+                if len(skill.strip()) >= min_length
+            ]
+            
+            if not normalized_skills:
+                logger.warning("No valid skills after normalization, using empty tree")
+                return EnhancedBKTree([])
+            
+            # Calculate memory-aware cache size
+            base_cache_size = self.config["caching"].get("bk_tree_cache_size", 1000)
+            
+            # Dynamic cache sizing based on available memory and skill count
+            mem_available_mb = psutil.virtual_memory().available / (1024 * 1024)
+            scaling_factor = self.config["hardware_limits"].get("memory_scaling_factor", 0.3)
+            
+            # Calculate safe cache size based on available memory and skills count
+            if scaling_factor > 0:
+                # Use at most 25% of available memory per MB for caching
+                memory_based_size = int(mem_available_mb * scaling_factor)
+                # Take the minimum of config setting, memory-based size, and actual skill count
+                cache_size = min(base_cache_size, memory_based_size, len(normalized_skills))
+            else:
+                # If scaling factor is disabled, use configuration value
+                cache_size = min(base_cache_size, len(normalized_skills))
+            
+            logger.info(f"Using BK-tree cache size of {cache_size} (from base: {base_cache_size})")
+            
+            # Create the enhanced tree with adaptive cache size
+            tree = EnhancedBKTree(normalized_skills, cache_size=cache_size)
+            
+            # Log success stats
+            logger.info(f"Built enhanced BK-tree with {len(normalized_skills)} skills")
+            return tree
+            
+        except Exception as e:
+            logger.error(f"Enhanced BK-tree initialization failed: {str(e)}")
+            # Return an empty but valid tree to prevent NoneType errors
+            return EnhancedBKTree([])
+
+    def _validate_pos_for_term(self, processed_doc):
+        """
+        Validate if a processed term has the allowed POS tags.
+        
+        Args:
+            processed_doc: spaCy Doc object to check
+            
+        Returns:
+            bool: True if term has at least one allowed POS tag
+        """
+        fuzzy_config = self.config["whitelist"]["fuzzy_matching"]
+        allowed_pos = fuzzy_config.get("allowed_pos", []) or fuzzy_config.get("default_pos_filter", [])
+        
+        # No POS filter defined, consider valid by default
+        if not allowed_pos:
+            return True
+            
+        # Check if any token has an allowed POS
+        return any(token.pos_ in allowed_pos for token in processed_doc)
+
+    def _apply_fuzzy_matching(self, keyword: str) -> List[str]:
+        """
+        Apply fuzzy matching to find similar terms in the whitelist.
+        
+        Args:
+            keyword: The keyword to match
+            
+        Returns:
+            List of matched terms
+        """
+        if not self.bk_tree:
+            return []
+            
+        fuzzy_config = self.config["whitelist"]["fuzzy_matching"]
+        threshold = fuzzy_config.get("min_similarity", 85)
+        max_candidates = fuzzy_config.get("max_candidates", 3)
+        
+        try:
+            keyword_lower = keyword.casefold()  # Use casefold for better Unicode handling
+            
+            # Get matches using the enhanced BK-tree
+            matches = self.bk_tree.find(
+                query=keyword_lower,
+                threshold=threshold,
+                limit=max_candidates
+            )
+            
+            # Process and filter matches using the unified validation pipeline
+            valid_matches = []
+            for _, match in matches:
+                # Skip exact duplicates
+                if match == keyword_lower:
+                    continue
+                    
+                # Use the new unified validation pipeline
+                if self._validate_fuzzy_candidate(match):
+                    valid_matches.append(match)
+                    
+            return valid_matches
+            
+        except Exception as e:
+            logger.error(f"Fuzzy matching error for '{keyword}': {str(e)}")
+            return []
+
     def _load_phrase_synonyms(self) -> Dict[str, List[str]]:
         """Loads and validates phrase synonyms from a JSON file."""
         synonyms_path = self.config["text_processing"].get("phrase_synonyms_path")
@@ -705,9 +909,10 @@ class AdvancedKeywordExtractor:
             for term, syns in raw_synonyms.items():
                 try:
                     entry = SynonymEntry(term=term, synonyms=syns)
-                    validated_synonyms[entry.term] = [
-                        s.lower() for s in entry.synonyms
-                    ]  # Lowercase
+                    # Use casefold() instead of lower() for more robust case-insensitivity
+                    validated_synonyms[entry.term.casefold()] = [
+                        s.casefold() for s in entry.synonyms
+                    ]
                 except ValidationError as e:
                     logger.warning(f"Invalid synonym entry for term '{term}': {e}")
             logger.info(
@@ -730,15 +935,15 @@ class AdvancedKeywordExtractor:
         # Preprocess and expand with synonyms and ngrams:
         processed_skills = set()
         for skill in all_skills:
-            # 1. Preprocess (lowercase, clean)
+            # 1. Preprocess (casefold, clean) - use casefold instead of lowercase
             cleaned_skill = self.preprocessor.preprocess(skill)
 
             # 2. Tokenize (using spaCy for consistency)
             doc = self.nlp(cleaned_skill)
             tokens = [
-                token.lemma_.lower()
+                token.lemma_.casefold()  # Use casefold instead of lower
                 for token in doc
-                if token.text.lower() not in self.preprocessor.stop_words
+                if token.text.casefold() not in self.preprocessor.stop_words
                 and len(token.text) > 1
             ]
 
@@ -759,44 +964,59 @@ class AdvancedKeywordExtractor:
         return processed_skills
 
     def _generate_synonyms(self, skills: List[str]) -> Set[str]:
+        """Generates synonyms for skills, prioritizing phrase-level matches."""
         synonyms = set()
+        # Get similarity threshold from config or use default
+        min_similarity = self.config["text_processing"].get("wordnet_similarity_threshold", 80)
+        
         for skill in skills:
+            skill_cf = skill.casefold()  # Use casefold() for better Unicode handling
             doc = self.nlp(skill)
-            lemmatized = " ".join([token.lemma_ for token in doc]).lower()
-            if lemmatized != skill.lower():  # Consistent lowercasing
-                synonyms.add(lemmatized)
-
-            for token in doc:
-                pos_tag = token.pos_
-                wn_pos = self._convert_spacy_to_wordnet_pos(pos_tag)
-                if wn_pos is None:
-                    continue
-
-                for syn in wn.synsets(token.text, pos=wn_pos):
-                    for lemma in syn.lemmas():
-                        synonym = (
-                            lemma.name().replace("_", " ").lower()
-                        )  # Consistent lowercasing
-                        if synonym not in (token.text.lower(), lemmatized):
-                            synonyms.add(synonym)
-
-            # Add phrase-level synonyms
-            source = self.config["text_processing"]["phrase_synonym_source"]
-            skill_lower = skill.lower()  # Use lowercased skill
-            if source == "static":
-                if skill_lower in self.phrase_synonyms:
-                    # Ensure case consistency for static synonyms
-                    synonyms.update(
-                        s.lower() for s in self.phrase_synonyms[skill_lower]
-                    )
-            elif source == "api":
-                api_synonyms = self._get_synonyms_from_api(skill)
-                # Ensure case consistency for API synonyms
-                synonyms.update(
-                    s.lower() for s in api_synonyms
-                )  # Consistent lowercasing
-
+            
+            # Handle phrase-level synonyms
+            if self._add_phrase_synonyms(skill_cf, synonyms):
+                continue  # Skip word-level processing if phrase synonyms found
+            
+            # Handle word-level synonyms with filtering
+            self._add_wordnet_synonyms(doc, synonyms, min_similarity)
+                
         return synonyms
+
+    def _add_phrase_synonyms(self, skill: str, synonyms: Set[str]) -> bool:
+        """Adds phrase-level synonyms from configured source. Returns True if any added."""
+        source = self.config["text_processing"]["phrase_synonym_source"]
+        
+        if source == "static" and skill in self.phrase_synonyms:
+            synonyms.update(s.casefold() for s in self.phrase_synonyms[skill])
+            return True
+        elif source == "api":
+            api_synonyms = self._get_synonyms_from_api(skill)
+            if api_synonyms:
+                synonyms.update(s.casefold() for s in api_synonyms)
+                return True
+        return False
+
+    def _add_wordnet_synonyms(self, doc, synonyms: Set[str], min_similarity: int):
+        """Adds filtered WordNet synonyms with similarity check."""
+        # Add normalized lemma form
+        lemmatized = " ".join(token.lemma_ for token in doc).casefold()
+        if lemmatized != doc.text.casefold():
+            synonyms.add(lemmatized)
+        
+        # Add filtered synonyms per token
+        for token in doc:
+            if token.is_stop or len(token.text) < 3:
+                continue
+                
+            wn_pos = self._convert_spacy_to_wordnet_pos(token.pos_)
+            if not wn_pos:
+                continue
+                
+            for syn in wn.synsets(token.text, pos=wn_pos):
+                for lemma in syn.lemmas():
+                    synonym = lemma.name().replace("_", " ").casefold()
+                    if synonym != token.text.casefold() and fuzz.ratio(token.text.casefold(), synonym) >= min_similarity:
+                        synonyms.add(synonym)
 
     def _convert_spacy_to_wordnet_pos(self, spacy_pos: str) -> Optional[str]:
         mapping = {"NOUN": wn.NOUN, "ADJ": wn.ADJ, "ADV": wn.ADV, "VERB": wn.VERB}
@@ -827,14 +1047,6 @@ class AdvancedKeywordExtractor:
                 category, data = future.result()
                 self.category_vectors[category] = data
 
-    @lru_cache(maxsize=10000)
-    def _categorize_term(self, term: str) -> str:
-        for category, data in self.category_vectors.items():
-            if data["terms"] is not None:
-                if any(keyword.lower() in term.lower() for keyword in data["terms"]):
-                    return category
-        return self._semantic_categorization(term)
-
     @lru_cache(maxsize=5000)
     def _get_term_vector(self, term: str) -> np.ndarray:
         try:
@@ -863,7 +1075,7 @@ class AdvancedKeywordExtractor:
         for category, data in self.category_vectors.items():
             if data["centroid"] is not None:
                 similarity = cosine_similarity(term_vec, data["centroid"])
-                if similarity > best_score:
+                if (similarity > best_score):
                     best_score = similarity
                     best_category = category
                 valid_categories += 1
@@ -883,75 +1095,101 @@ class AdvancedKeywordExtractor:
         """Extracts keywords, yielding (original_tokens, filtered_keywords) for each text."""
         docs = list(self.nlp.pipe(texts))
         for doc, text in zip(docs, texts):
-            try:  # Error handling WITHIN the generator
+            try:
+                # Extract entity keywords (skills directly recognized by spaCy)
                 entity_keywords = [
                     ent.text for ent in doc.ents if ent.label_ == "SKILL"
                 ]
 
+                # Track skill spans to avoid processing them twice
                 skill_spans = [
                     (ent.start, ent.end) for ent in doc.ents if ent.label_ == "SKILL"
                 ]
+                
+                # Extract non-entity tokens (avoiding tokens already in skill entities)
                 non_entity_tokens = []
                 for i, token in enumerate(doc):
                     if any(start <= i < end for start, end in skill_spans):
                         continue
-                    non_entity_tokens.append(token.text)
+                    if not token.is_stop and len(token.text) > 1:
+                        non_entity_tokens.append(token.text)
 
-                preprocessed_text = self.preprocessor.preprocess(
-                    " ".join(non_entity_tokens)
-                )
-                token_list = preprocessed_text.split()
-
-                original_tokens = list(
-                    set(
-                        [t.lower() for t in entity_keywords]
-                        + [
-                            t
-                            for t in token_list
-                            if t not in self.preprocessor.stop_words and len(t) > 1
-                        ]
-                    )
-                )
-
+                # Preprocess the non-entity text
+                preprocessed_text = self.preprocessor.preprocess(" ".join(non_entity_tokens))
+                
+                # Create original tokens list (unique, case-folded)
+                original_tokens = list(set(
+                    [t.casefold() for t in entity_keywords] + 
+                    [t for t in preprocessed_text.split() 
+                     if t not in self.preprocessor.stop_words and len(t) > 1]
+                ))
+                
+                # Initialize keywords set with entity keywords
+                keywords = set(entity_keywords)
+                
+                # Generate n-grams from non-entity tokens using lemmatization for better matching
                 non_entity_keywords = set()
-
+                tokens = [token.lemma_.lower() for token in doc 
+                          if not token.is_stop and len(token.text) > 1 and
+                          not any(start <= token.i < end for start, end in skill_spans)]
+                
                 for n in range(self.ngram_range[0], self.ngram_range[1] + 1):
-                    non_entity_keywords.update(self._generate_ngrams(token_list, n))
-
-                keywords = set(entity_keywords) | non_entity_keywords
+                    n_grams = self._generate_ngrams(tokens, n)
+                    non_entity_keywords.update(n_grams)
+                
+                # Combine all keywords
+                keywords.update(non_entity_keywords)
+                
+                # Basic filtering
                 filtered_keywords = [
-                    kw
-                    for kw in keywords
+                    kw for kw in keywords
                     if len(kw.strip()) > 1
                     and not any(len(w.strip()) <= 1 for w in kw.split())
                     and not all(w in self.preprocessor.stop_words for w in kw.split())
                 ]
-
-                # Configurable processing order (Fuzzy before/after Semantic)
-                if self.config["text_processing"].get("fuzzy_before_semantic", True):
-                    filtered_keywords_list = self._apply_fuzzy_matching_and_pos_filter(
-                        [filtered_keywords]
-                    )
-                    if filtered_keywords_list:
-                        filtered_keywords = filtered_keywords_list[0]
+                
+                # Apply staged filtering for efficiency
+                if filtered_keywords:
+                    # Stage 1: First separate whitelist keywords (direct matches)
+                    whitelisted = []
+                    nonwhitelisted = []
+                    
+                    for kw in filtered_keywords:
+                        if kw.lower() in self.all_skills:
+                            whitelisted.append(kw)
+                        else:
+                            nonwhitelisted.append(kw)
+                    
+                    # Stage 2: Apply fuzzy matching only to non-whitelisted keywords
+                    fuzzy_matched = []
+                    if nonwhitelisted:
+                        # Use existing fuzzy matching but only on non-whitelisted terms
+                        matched_list = self._apply_fuzzy_matching_and_pos_filter([nonwhitelisted])
+                        if matched_list:
+                            fuzzy_matched = matched_list[0]
+                    
+                    # Stage 3: Apply semantic filtering only if configured
+                    if self.config["text_processing"].get("semantic_validation", False):
+                        # Combine results and filter semantically
+                        combined = whitelisted + fuzzy_matched
+                        
+                        # Apply semantic filtering
+                        if combined:
+                            # Apply semantic filter only to fuzzy-matched terms to save processing time
+                            # but avoid filtering whitelisted terms which are already validated
+                            negative_set = set(self.config.get("negative_keywords", []))
+                            filtered_keywords = [
+                                kw for kw in whitelisted
+                                if kw.lower() not in negative_set
+                            ] + [
+                                kw for kw in fuzzy_matched
+                                if kw.lower() not in negative_set and self._is_in_context(kw, doc)
+                            ]
+                        else:
+                            filtered_keywords = []
                     else:
-                        filtered_keywords = []
-                    if self.config.get("semantic_validation", False):
-                        filtered_keywords = self._semantic_filter(
-                            [filtered_keywords], [doc]
-                        )[0]
-                else:  # Semantic before Fuzzy
-                    if self.config.get("semantic_validation", False):
-                        filtered_keywords = self._semantic_filter(
-                            [filtered_keywords], [doc]
-                        )[0]
-                    filtered_keywords_list = self._apply_fuzzy_matching_and_pos_filter(
-                        [filtered_keywords]
-                    )
-                    if filtered_keywords_list:
-                        filtered_keywords = filtered_keywords_list[0]
-                    else:
-                        filtered_keywords = []
+                        # Skip semantic filtering if disabled
+                        filtered_keywords = whitelisted + fuzzy_matched
 
                 yield (original_tokens, filtered_keywords)
 
@@ -980,20 +1218,20 @@ class AdvancedKeywordExtractor:
         filtered_keyword_lists = []
         for keywords in keyword_lists:
             filtered_keywords = []
+            threshold = self.config["whitelist"]["fuzzy_matching"].get(
+                "min_similarity", 85
+            )
+
             for keyword in keywords:
-                if keyword.lower() in self.all_skills:
+                keyword_lower = keyword.lower()
+                if keyword_lower in self.all_skills:
                     filtered_keywords.append(keyword)
                     continue
 
-                best_match, score = process.extractOne(
-                    keyword.lower(),
-                    self.all_skills,
-                    scorer=scorer,
-                    score_cutoff=score_cutoff,
-                )
-                if best_match and score >= score_cutoff:
-                    term_doc = cached_process_term(best_match)
-                    # Use the allowed_pos from the config
+                matches = self.bk_tree.find(keyword_lower, threshold)
+                if matches:
+                    best_match = min(matches, key=lambda x: x[0])[1]
+                    term_doc = self._process_term(best_match)
                     if allowed_pos and any(
                         token.pos_ in allowed_pos for token in term_doc
                     ):
@@ -1016,47 +1254,35 @@ class AdvancedKeywordExtractor:
         ]
 
     def _is_in_context(self, keyword: str, doc) -> bool:
-        if not self.config.get("semantic_validation", False):
-            return True
-
-        if keyword in self.config.get("negative_keywords", []):
-            return False
-
-        keyword_doc = self.nlp(keyword)
-        if hasattr(keyword_doc._, "trf_data") and keyword_doc._.trf_data.tensors:
-            keyword_embedding = keyword_doc._.trf_data.tensors[0].mean(axis=0)
-        else:
-            keyword_embedding = keyword_doc.vector
-
-        if keyword_embedding.size == 0:
-            logger.debug(f"Empty embedding for '{keyword}' - skipping semantic check")
-            return True
-
-        sentences = self._extract_sentences(doc.text)  # Use the new sentence extractor
-        context_window = self._get_context_window(sentences, keyword)
-
+        # Extract context window for semantic validation
+        context_window = self._get_context_window(
+            self._extract_sentences(doc.text), keyword
+        )
+        
         if not context_window:
             return False
-
+            
+        # Create context doc
         context_doc = self.nlp(context_window)
-        if hasattr(context_doc._, "trf_data") and context_doc._.trf_data.tensors:
-            context_embedding = context_doc._.trf_data.tensors[0].mean(axis=0)
-        else:
-            context_embedding = context_doc.vector
-
-        if context_embedding.size == 0:
-            logger.debug(f"Empty embedding for context window - skipping")
-            return True
-
-        similarity = cosine_similarity(keyword_embedding, context_embedding)
-        return similarity > self.config["text_processing"]["similarity_threshold"]
+        
+        # Use validator for semantic validation
+        return self.validator.validate_term(keyword, context_doc)
 
     # Added method for extracting sentences with custom rules
     def _extract_sentences(self, text: str) -> List[str]:
-        # Custom rules to split sentences based on bullet points and numbered lists
-        text = re.sub(r"(\s*•\s*|-\s+|\s*[0-9]+\.\s+)", r"\n", text)
         doc = self.nlp(text)
-        return [sent.text.strip() for sent in doc.sents]
+        sentences = [sent.text.strip() for sent in doc.sents]
+
+        # Add custom rules *after* spaCy's segmentation (optional and configurable)
+        if self.config["text_processing"].get("custom_sentence_rules", False):
+            # Example: Split sentences after bullet points (•)
+            new_sentences = []
+            for sentence in sentences:
+                parts = sentence.split("•")  # Simple split, might need refinement
+                new_sentences.extend(part.strip() for part in parts if part.strip())
+            sentences = new_sentences
+
+        return sentences
 
     # Replace the existing _get_context_window method
     def _get_context_window(self, sentences: List[str], keyword: str) -> str:
@@ -1077,16 +1303,36 @@ class AdvancedKeywordExtractor:
         return ""
 
     def _extract_sections(self, text: str) -> Dict[str, str]:
-        doc = self.nlp(text)
+        """
+        Extract sections from text by identifying section headings.
+        Returns a dictionary mapping section names to their content.
+        """
         sections = {}
-        current_section = "General"
-        sections[current_section] = ""
-        for sent in doc.sents:
-            match = self._section_heading_re.match(sent.text)
-            if match:
-                current_section = match.group(0).strip().rstrip(":")
-                sections[current_section] = ""
-            sections[current_section] += " " + sent.text.strip()
+        
+        # Find all section headings and their positions
+        headings_with_positions = []
+        for match in self._section_heading_re.finditer(text):
+            heading = match.group(0).strip().rstrip(":").lower()
+            headings_with_positions.append((heading, match.start(), match.end()))
+        
+        # If no headings found, put everything in "General"
+        if not headings_with_positions:
+            sections["General"] = text
+            return sections
+        
+        # Handle text before the first heading
+        if headings_with_positions[0][1] > 0:
+            sections["General"] = text[:headings_with_positions[0][1]].strip()
+        
+        # Handle text between headings and after the last heading
+        for i, (heading, _, end_pos) in enumerate(headings_with_positions):
+            if i < len(headings_with_positions) - 1:
+                next_start = headings_with_positions[i+1][1]
+                sections[heading] = text[end_pos:next_start].strip()
+            else:
+                # Last heading - grab text to the end
+                sections[heading] = text[end_pos:].strip()
+        
         return sections
 
     def save_analysis_results(self, df: pd.DataFrame, path: str) -> None:
@@ -1096,88 +1342,141 @@ class AdvancedKeywordExtractor:
     def _calc_metrics(self, chunk_results: Tuple[pd.DataFrame, pd.DataFrame]) -> Dict:
         start_time = time.time()
         summary, _ = chunk_results
+
         # Calculate recall against the *original* set of skills (before expansion)
         original_skills = set()
         for category_skills in self.config["keyword_categories"].values():
             original_skills.update(s.lower() for s in category_skills)
 
-        recall = (
-            len(set(summary.index.str.lower()) & original_skills) / len(original_skills)
+        # Calculate recall against the *expanded* set of skills
+        expanded_skills = set(s.lower() for s in self.keyword_extractor.all_skills)
+
+        # Extract lowercased keywords from summary
+        extracted_keywords = set(summary.index.str.lower())
+
+        # Calculate metrics
+        original_recall = (
+            len(extracted_keywords & original_skills) / len(original_skills)
             if original_skills
             else 0
         )
+
+        expanded_recall = (
+        )
+
         # Prevent division by zero by checking both emptiness and length
         time_per_job = (
             (time.time() - start_time) / len(summary)
             if not summary.empty and len(summary) > 0
             else 0.5
         )
+
         return {
-            "recall": recall,
+            "original_recall": original_recall,
+            "expanded_recall": expanded_recall,  # This will be our primary recall metric
+            "precision": precision,
+            "f1_score": f1_score,
             "memory": psutil.virtual_memory().percent,
             "time_per_job": time_per_job,
         }
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(
+            (requests.exceptions.RequestException, json.JSONDecodeError),
+        ),
+    )
     def _get_synonyms_from_api(self, phrase: str) -> List[str]:
-        """Fetches synonyms from the API with caching, timeout, and exponential backoff retries."""
+        """Fetches synonyms from the API with caching, circuit breaker and retries."""
         phrase_lower = phrase.lower()
-        if phrase_lower in self.api_cache:
-            return self.api_cache[phrase_lower]
+        
+        # Check cache first with TTL support
+        cache_entry = self.cache_manager.get(phrase_lower)
+        if cache_entry is not None:
+            return cache_entry
+        
+        # Circuit breaker pattern via decorator
+        if self.api_circuit_breaker.state == "OPEN":
+            logger.warning(f"Circuit breaker open for API, using empty synonyms for '{phrase}'")
+            return []
 
         endpoint = self.config["text_processing"]["api_endpoint"]
         api_key = self.config["text_processing"]["api_key"]
         headers = {"Authorization": f"Bearer {api_key}"}
         params = {"phrase": phrase}
 
-        max_retries = 3
-        base_delay = 1  # seconds
+        try:
+            response = requests.get(endpoint, headers=headers, params=params, timeout=5)
+            
+            # Enhanced status code handling with security considerations
+            if response.status_code == 401:
+                logger.error(f"API authentication failed for phrase: {phrase}")
+                # Don't cache authentication failures permanently
+                self.cache_manager.set(phrase_lower, [], time.time() + 300)  # Short TTL for auth failures
+                raise AuthenticationError("Invalid API credentials")
+            elif response.status_code == 403:
+                logger.warning(f"API authorization failed for phrase: {phrase}")
+                self.cache_manager.set(phrase_lower, [], time.time() + 300)  # Short TTL
+                raise AuthenticationError("Insufficient API privileges")
+            elif response.status_code == 429:
+                logger.warning("API rate limit exceeded. Backing off...")
+                # Don't cache rate limit errors
+                raise NetworkError("Rate limit exceeded")
+            elif 500 <= response.status_code < 600:
+                logger.warning(f"Server error: {response.status_code}")
+                # Don't cache server errors
+                raise APIError(f"Server error: {response.status_code}")
+                    
+            response.raise_for_status()  # Raises HTTPError for other bad requests
 
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(
-                    endpoint, headers=headers, params=params, timeout=5
-                )
-                response.raise_for_status()  # This will raise for 4xx and 5xx errors
-
-                try:
-                    data = response.json()
-                except json.JSONDecodeError as e:
-                    logger.warning(
-                        f"API JSON decoding error for phrase: {phrase} - {e}"
-                    )
-                    self.api_cache[phrase_lower] = []
-                    return []
-
-                if "synonyms" not in data:
-                    logger.warning(
-                        f"API response missing 'synonyms' key for phrase: {phrase}"
-                    )
-                    self.api_cache[phrase_lower] = []
-                    return []
-                synonyms = data["synonyms"]
-                self.api_cache[phrase_lower] = synonyms
-                return synonyms
-            except requests.Timeout as e:
-                logger.warning(
-                    f"API timeout (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-            except requests.RequestException as e:  # Catch *all* request exceptions
-                logger.warning(f"API error (attempt {attempt + 1}/{max_retries}): {e}")
-                # Log the full response if possible for debugging
-                if hasattr(e, "response") and e.response is not None:
-                    logger.warning(f"API Response: {e.response.text}")
-            if attempt < max_retries - 1:
-                delay = base_delay * (2**attempt)  # Exponential backoff
-                logger.info(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
+            data = response.json()
+            if "synonyms" not in data:
+                logger.warning(f"API response missing 'synonyms' key for phrase: {phrase}")
+                synonyms = []
             else:
-                logger.error(
-                    f"API request failed after {max_retries} retries for phrase: {phrase}"
-                )
-                self.api_cache[phrase_lower] = []
-                return []
+                synonyms = data["synonyms"]
+            
+            # Cache with TTL based on response headers
+            cache_ttl = None
+            cache_control = response.headers.get("Cache-Control", "")
+            if "max-age" in cache_control:
+                try:
+                    ttl = int(re.search(r'max-age=(\d+)', cache_control).group(1))
+                    cache_ttl = time.time() + ttl
+                except (AttributeError, ValueError):
+                    # Default TTL if parsing fails
+                    cache_ttl = time.time() + 3600  # 1 hour default
+            else:
+                # Use default TTL if no cache-control
+                cache_ttl = time.time() + 3600  # 1 hour default
+                
+            # Store in cache with TTL
+            self.cache_manager.set(phrase_lower, synonyms, cache_ttl - time.time())
+            return synonyms
 
-    @lru_cache(maxsize=None)  # Or a reasonable maxsize, e.g., 1024*10
+        except requests.exceptions.Timeout:
+            logger.warning(f"API timeout for phrase: {phrase}")
+            # Don't cache timeouts
+            raise NetworkError("API request timed out")
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(f"Connection error to API for phrase: {phrase} - {e}")
+            # Don't cache connection errors
+            raise NetworkError(f"Connection error: {e}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON response for phrase: {phrase} - {e}")
+            # Cache invalid responses with short TTL
+            self.cache_manager.set(phrase_lower, [], 300)  # 5 min TTL
+            raise APIError(f"Invalid JSON response: {e}")
+        except requests.exceptions.HTTPError as e:
+            # Already logged specific status codes above
+            # Don't cache HTTP errors
+            raise APIError(f"HTTP error: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"API request error for phrase: {phrase} - {e}")
+            # Don't cache general request errors
+            raise NetworkError(f"Request error: {e}")
+
     def _generate_ngrams(self, tokens: List[str], n: int) -> Set[str]:
         if not isinstance(n, int) or n <= 0:
             raise ValueError("n must be a positive integer")  # Robustness check
@@ -1198,10 +1497,14 @@ class AdvancedKeywordExtractor:
         return ngrams
 
     def _detect_keyword_section(self, keyword: str, text: str) -> str:
-        keyword_lower = keyword.lower()
+        # Pre-compute casefolded versions for better performance
+        keyword_cf = keyword.casefold()
+        text_cf = text.casefold()
+        
         match = re.search(
-            rf"(?i)\b{re.escape(keyword_lower)}\b", text
-        )  # Case-insensitive, whole word match
+            rf"\b{re.escape(keyword_cf)}\b", text_cf
+        )  # Use pre-computed casefold
+        
         if match:
             match_start = match.start()
             sections = {}
@@ -1209,16 +1512,15 @@ class AdvancedKeywordExtractor:
             sections[current_section] = ""
 
             # Find section headings *before* the keyword match
-            for heading_match in self._section_heading_re.finditer(text):
+            for heading_match in self._section_heading_re.finditer(text_cf):
                 if heading_match.start() < match_start:
-                    current_section = heading_match.group(0).strip().rstrip(":").lower()
+                    current_section = heading_match.group(0).strip().rstrip(":").casefold()
                 else:
-                    break  # Stop searching after the keyword
+                    break  # Stop searching after the keyword - add this optimization
             return current_section
 
-        return "default"
+        return "default"  # Add explicit return for no-match case
 
-    # Add missing _process_term method
     def _process_term(self, term: str):
         """
         Process a term through spaCy for POS tagging and other linguistic analysis.
@@ -1236,23 +1538,54 @@ class AdvancedKeywordExtractor:
             # Return empty doc as fallback
             return self.nlp("")
 
+    def _validate_fuzzy_candidate(self, candidate: str) -> bool:
+        """
+        Unified validation pipeline for fuzzy match candidates.
+        
+        Args:
+            candidate: String candidate to validate
+            
+        Returns:
+            bool: True if candidate passes all validation checks
+        """
+        # Skip empty candidates
+        if not candidate or len(candidate.strip()) < 2:
+            return False
+            
+        # Process the term to get a spaCy doc for POS validation
+        processed_doc = self._process_term_cached(candidate)
+        if not processed_doc or not len(processed_doc):
+            return False
+        
+        # Apply POS filtering using existing method
+        if not self._validate_pos_for_term(processed_doc):
+            return False
+        
+        # Apply semantic validation if enabled
+        if self.config["text_processing"].get("semantic_validation", False):
+            # Need context for semantic validation, use a minimal context
+            # This is a compromise - ideally we'd have the actual context
+            minimal_context = self.nlp(f"The term {candidate} is relevant.")
+            return self.validator.validate_term(candidate, minimal_context)
+        
+        return True
+
+
+from multiprocess_helpers import init_worker, process_chunk
+import multiprocessing
 
 class ParallelProcessor:
-    def __init__(self, config: Dict, nlp, keyword_extractor):
+    def __init__(self, config: Dict, keyword_extractor, nlp):  # Accept nlp parameter
         self.config = config
-        self.nlp = nlp
-        try:
-            self.complexity_cache = LRUCache(
-                maxsize=config["caching"].get("cache_size", 1000)
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize LRUCache: {e}")
-            self.complexity_cache = {}
         self.keyword_extractor = keyword_extractor
+        self.nlp = nlp  # Store the passed-in nlp model
+        self.disabled_pipes = self.config["text_processing"]["spacy_pipeline"].get(
+            "disabled_components", []
+        )
+        # Initialize complexity_cache
+        self.complexity_cache = LRUCache(maxsize=1000)  # Add a reasonable size
 
     def get_optimal_workers(self, texts: List[str]) -> int:
-        import torch  # Local import
-
         sample_size = max(
             10, min(100, int(len(texts) * 0.1))
         )  # 10% of texts, clamped between 10 and 100
@@ -1289,22 +1622,43 @@ class ParallelProcessor:
         avg_complexity = np.mean(complexities) if complexities else 1
         mem_available = psutil.virtual_memory().available / (1024**3)
 
-        # --- GPU Memory Check (Optional) ---
-        if self.config["hardware_limits"].get("use_gpu", False) and self.config.get(
-            "check_gpu_memory", False
-        ):
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                free_mem = torch.cuda.mem_get_info()[0]
-                if free_mem < 2e9:  # 2GB threshold
-                    logger.warning(
-                        "GPU memory low, disabling GPU usage (or reducing workers)"
-                    )
-                    # Option 1: Disable GPU (less preferred)
-                    # self.config["hardware_limits"]["use_gpu"] = False
-                    # Option 2: Reduce workers (more robust)
-                    return max(1, self.config["hardware_limits"]["max_workers"] // 2)
+        # --- Enhanced GPU Memory Check with multi-level fallback ---
+        if self.config["hardware_limits"].get("use_gpu", False):
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    free_mem, total_mem = torch.cuda.mem_get_info()
+                    
+                    # Get threshold from config with safety defaults
+                    gpu_mem_threshold = self.config["hardware_limits"].get(
+                        "gpu_memory_threshold_gb", 2.0
+                    ) * 1e9  # Convert GB to bytes
 
+                    # Calculate memory requirements per worker dynamically
+                    avg_ent_count = np.mean([c for c in complexities if c > 0]) if complexities else 1
+                    mem_per_worker = (self.config["optimization"].get("memory_per_entity", 0.1) 
+                                    * avg_ent_count * 1e6)  # MB
+
+                    if free_mem < gpu_mem_threshold:
+                        # Calculate safe worker count using multiple constraints
+                        max_possible = min(
+                            int(free_mem / (mem_per_worker * 1e6)),  # Absolute memory limit
+                            self.config["hardware_limits"].get("max_workers", 4),  # Config cap
+                            int(psutil.cpu_count() * 0.75)  # CPU core limit
+                        )
+                        safe_workers = max(1, max_possible)
+                        
+                        logger.warning(
+                            f"GPU memory constrained: {free_mem/1e9:.1f}GB free. "
+                            f"Reducing workers to {safe_workers} (mem/worker: {mem_per_worker:.1f}MB)"
+                        )
+                        return safe_workers
+
+            except Exception as e:
+                logger.error(f"GPU check failed: {str(e)}. Falling back to CPU-only calculation")
+                return max(1, self.config["hardware_limits"].get("max_workers", 4) // 2)
+
+        # Existing CPU-based calculation
         return min(
             self.config["hardware_limits"].get("max_workers", 4),
             max(
@@ -1317,15 +1671,35 @@ class ParallelProcessor:
         )
 
     def extract_keywords(self, texts: List[str]) -> List[List[str]]:
+        """Extracts keywords from texts using an optimized parallel processing approach."""
         workers = self.get_optimal_workers(texts)
         chunk_size = max(1, len(texts) // workers)
         chunks = self._chunk_texts(texts, chunk_size)
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(self._process_text_chunk, chunks))
+        
+        # Check if we should use GPU
+        use_gpu = self.config["hardware_limits"].get("use_gpu", False)
+        
+        # Use Pool with initializer to avoid transmitting the large model
+        with multiprocessing.Pool(
+            processes=workers,
+            initializer=init_worker,
+            initargs=(self.config, use_gpu),
+            maxtasksperchild=self.config.get("hardware_limits", {}).get("maxtasksperchild", None)
+        ) as pool:
+            results = pool.map(process_chunk, chunks)
+            
+        # Flatten results as in original code
         return [kw for chunk_result in results for kw in chunk_result]
 
-    def _process_text_chunk(self, texts: List[str]) -> List[List[str]]:
-        return self.keyword_extractor.extract_keywords(texts)
+    def _process_text_chunk(
+        self, texts: List[str]
+    ) -> Generator[Tuple[List[str], List[str]], None, None]:
+        # Use the already loaded nlp model instead of loading it again
+        # Create a keyword extractor with our existing model
+        keyword_extractor = AdvancedKeywordExtractor(self.config, self.nlp)
+
+        # Return the generator directly without materializing as a list
+        return keyword_extractor.extract_keywords(texts)
 
     def _chunk_texts(self, texts: List[str], chunk_size: int) -> List[List[str]]:
         return [texts[i : i + chunk_size] for i in range(0, len(texts), chunk_size)]
@@ -1333,10 +1707,16 @@ class ParallelProcessor:
 
 class TrigramOptimizer:
     def __init__(
-        self, config: Dict, all_skills: List[str], nlp, keyword_extractor
-    ):  # Add keyword_extractor parameter
+        self, config: Dict, all_skills: List[str], keyword_extractor
+    ):  
         self.config = config
-        self.nlp = nlp
+        
+        # Add validation to ensure keyword_extractor has valid nlp attribute
+        if not hasattr(keyword_extractor, 'nlp'):
+            logger.error("keyword_extractor missing nlp attribute")
+            raise ConfigError("keyword_extractor must provide an nlp model")
+        
+        self.nlp = keyword_extractor.nlp
         self.cache = LRUCache(
             maxsize=config["optimization"].get("trigram_cache_size", 1000)
         )
@@ -1344,25 +1724,25 @@ class TrigramOptimizer:
         self.hit_rates.append(0)
 
         # Use the existing preprocessor from keyword_extractor
-        self.keyword_extractor = keyword_extractor  # Store the keyword_extractor
-        self.preprocessor = (
-            self.keyword_extractor.preprocessor
-        )  # Use existing preprocessor
+        self.keyword_extractor = keyword_extractor
+        self.preprocessor = self.keyword_extractor.preprocessor
 
+        # Dynamic cache sizing based on available memory and configuration
         warmup_size = min(
             config["optimization"].get("trigram_warmup_size", 100),
             len(all_skills),
             int(psutil.virtual_memory().available / (1024 * 1024 * 0.1)),
         )
+        
+        # Log empty skills warning
         if not all_skills:
             logger.warning("No skills loaded from categories for TrigramOptimizer")
 
         # --- MODIFIED: Warmup using preprocessed tokens ---
+        successful_warmups = 0
         for skill in all_skills[:warmup_size]:
             try:
-                cleaned_skill = self.preprocessor.preprocess(
-                    skill
-                )  # Use self.preprocessor
+                cleaned_skill = self.preprocessor.preprocess(skill)
                 doc = self.nlp(cleaned_skill)
                 tokens = [
                     token.lemma_.lower()
@@ -1372,14 +1752,15 @@ class TrigramOptimizer:
                 ]
                 # Use the tokens for warmup
                 for n in range(1, 3 + 1):  # Generate up to trigrams
-                    for ngram in self._generate_ngrams(
-                        tokens, n
-                    ):  # Use cached _generate_ngrams
+                    for ngram in self._generate_ngrams(tokens, n):
                         self.get_candidates(ngram)  # Add to cache
-
+                successful_warmups += 1
             except (ValueError, TypeError, AttributeError) as e:
                 logger.warning(f"Error during warmup for '{skill[:50]}...': {e}")
-        logger.info(f"Warmed up trigram cache with {warmup_size} category terms")
+        
+        # Enhanced logging with success rate
+        success_rate = successful_warmups / warmup_size if warmup_size > 0 else 0
+        logger.info(f"Warmed up trigram cache with {successful_warmups}/{warmup_size} terms ({success_rate:.1%} success rate)")
 
     @lru_cache(maxsize=1024)  # Use a reasonable maxsize
     def _generate_ngrams(self, tokens: List[str], n: int) -> Set[str]:
@@ -1448,7 +1829,8 @@ class SmartChunker:
         self.base_learning_rate = config["optimization"].get("chunk_learning_rate", 0.1)
         self.learning_rate = self.base_learning_rate
         self.reward_history = deque(maxlen=10)
-        self.state_history = deque(maxlen=100)
+        self.state_history = []  # Changed from deque to a regular list
+        self.state_history_maxlen = 100  # Store the maxlen as a separate variable
         self.last_reward = None
 
     def get_chunk_size(self, dataset_stats: Dict) -> int:
@@ -1458,12 +1840,11 @@ class SmartChunker:
             int(psutil.virtual_memory().percent / 10),
         )
         self.state_history.append(state)
+        # Manually manage the list size to mimic deque's maxlen behavior
+        if len(self.state_history) > self.state_history_maxlen:
+            self.state_history = self.state_history[-self.state_history_maxlen:]
+            
         for key in list(self.q_table.keys()):
-            self.q_table[key] *= self.decay_factor
-            if self.q_table[key] < 0.01:
-                del self.q_table[key]
-
-        return max(
             self.config["dataset"].get("min_chunk_size", 10),
             min(
                 self.config["dataset"].get("max_chunk_size", 200),
@@ -1475,8 +1856,10 @@ class SmartChunker:
             ),
         )
 
-    def update_model(self, reward: float):
+    def update_model(self, reward: float, chunk_size: Optional[int] = None):
         self.reward_history.append(reward)
+        if (chunk_size is not None):
+            self.config["dataset"]["default_chunk_size"] = chunk_size
         if len(self.reward_history) >= 10:
             reward_std = np.std(list(self.reward_history))
             low, high = (
@@ -1525,41 +1908,60 @@ class AutoTuner:
             self.config["dataset"].get("min_chunk_size", 10),
             self.config["dataset"].get("max_chunk_size", 200),
         )
-        return new_params
-
-    def _adjust_chunk_size(self, mem_trend: float) -> int:
-        current = self.config["dataset"].get(
-            "chunk_size", self.config["dataset"]["default_chunk_size"]
-        )
-        if mem_trend > 80:
-            return current // 2
-        if mem_trend < 60:
-            return current * 2
-        return current
+        return new_params  # Return the new parameters
 
 
 class OptimizedATS:
     def __init__(self, config_path: str = "config.yaml"):
+        # 1. Load config FIRST
         self.config = load_config(config_path)
-        if not self.config.get(
-            "keyword_categories"
-        ):  # Check for existence and non-emptiness
+        if not self.config.get("keyword_categories"):
             raise ConfigError(
                 "The 'keyword_categories' section must be defined in the config.yaml file and contain at least one category."
             )
+        
+        # 2. Validate basic config structure
+        self._validate_config()
+        
+        # 3. Initialize core NLP component FIRST
         self.nlp = self._load_and_configure_spacy_model()
-        self.keyword_extractor = AdvancedKeywordExtractor(self.config, self.nlp)
+        self._add_entity_ruler(self.nlp)
+        
+        # 4. Initialize preprocessing SECOND
+        self.preprocessor = EnhancedTextPreprocessor(self.config, self.nlp)
+        
+        # 5. Initialize keyword extraction THIRD
+        self.keyword_extractor = AdvancedKeywordExtractor(
+            config=self.config,
+            nlp=self.nlp,
+            preprocessor=self.preprocessor  # Explicit dependency
+        )
+        
+        # 6. Initialize keyword canonicalizer - NEW
+        self.keyword_canonicalizer = KeywordCanonicalizer(
+            nlp=self.nlp,
+            config=self.config
+        )
+        
+        # 7. Initialize parallel processing FOURTH
         self.processor = ParallelProcessor(
-            self.config, self.nlp, self.keyword_extractor
+            config=self.config,
+            keyword_extractor=self.keyword_extractor,
+            nlp=self.nlp
         )
+        
+        # 8. Initialize optimization components LAST
         self.trigram_optim = TrigramOptimizer(
-            self.config,
-            self.keyword_extractor.all_skills,
-            self.nlp,
-            self.keyword_extractor,  # Pass keyword_extractor
+            config=self.config,
+            all_skills=self.keyword_extractor.all_skills,
+            keyword_extractor=self.keyword_extractor  # Pass keyword_extractor directly
         )
+        
+        # 9. Initialize remaining components
         self.chunker = SmartChunker(self.config)
         self.tuner = AutoTuner(self.config)
+        
+        # 10. Set up working directory (from existing code)
         self.working_dir = Path(
             self.config["intermediate_save"].get("working_dir", "working_dir")
         )
@@ -1567,8 +1969,8 @@ class OptimizedATS:
         self.run_id = xxhash.xxh3_64(
             f"{time.time()}_{random.randint(0, 1000)}".encode()
         ).hexdigest()
-        self._validate_config()
-        self._add_entity_ruler(self.nlp)  # Pass nlp
+        
+        # 11. Initialize categories
         self._init_categories()
         self.checksum_manifest_path = (
             self.working_dir / f"{self.run_id}_checksums.jsonl"
@@ -1626,15 +2028,8 @@ class OptimizedATS:
                     logger.warning("Empty chunk encountered. Skipping.")
                     continue
 
-                texts = list(chunk.values())
-                # Use the generator but collect results immediately for this batch
-                enhanced_keywords_with_original = list(
-                    self.processor.keyword_extractor.extract_keywords(texts)
-                )
-
-                chunk_results = self._process_chunk(
-                    dict(zip(chunk.keys(), enhanced_keywords_with_original)), chunk
-                )
+                # Process the chunk without converting generator to list
+                chunk_results = self._process_chunk(chunk)
                 if chunk_results:
                     results.append(chunk_results)
 
@@ -1652,8 +2047,10 @@ class OptimizedATS:
                     else 0
                 )
                 new_params = self.tuner.tune_parameters(metrics, hit_rate)
-                self.config.update(new_params)
-                self.chunker.update_model(self._calc_reward(metrics))
+                # Update relevant components directly
+                self.chunker.update_model(
+                    self._calc_reward(metrics), new_params.get("chunk_size")
+                )
 
             gc.collect()
 
@@ -1670,7 +2067,7 @@ class OptimizedATS:
     def _calc_dataset_stats(self, job_descriptions: Dict) -> Dict:
         lengths = [len(desc) for desc in job_descriptions.values()]
         return {
-            "avg_length": np.mean(lengths) if lengths else 0,
+            "avg_length": np.nanmean(lengths) if lengths else 0,  # Use np.nanmean instead of np.mean
             "num_texts": len(job_descriptions),
         }
 
@@ -1687,18 +2084,54 @@ class OptimizedATS:
         ]
 
     def _process_chunk(
-        self, keywords: Dict, chunk: Dict
+        self, chunk: Dict
     ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
         if not chunk:
             return None
         try:
-            # Pass keywords directly, no need to extract values or texts
-            dtm, features = self._create_tfidf_matrix(
-                list(keywords.values())  # Only pass the keyword tuples
+            # Create keyword generator directly from chunk values
+            keywords_generator = self.processor._process_text_chunk(
+                list(chunk.values())
             )
 
-            # Convert generator to list for DataFrame creation
-            results = list(self._calculate_scores(dtm, features, keywords, chunk))
+            # NEW: Collect and canonicalize keywords before processing
+            all_keywords = []
+            job_titles = list(chunk.keys())
+            original_keywords_by_job = {}
+            
+            # First pass to extract keywords
+            for i, (original_tokens, expanded_keywords) in enumerate(keywords_generator):
+                job_title = job_titles[i] if i < len(job_titles) else f"Job_{i}"
+                combined_keywords = list(set(original_tokens + expanded_keywords))
+                all_keywords.extend(combined_keywords)
+                original_keywords_by_job[job_title] = combined_keywords
+            
+            # Canonicalize all keywords
+            all_skills = self.keyword_extractor.all_skills if hasattr(self.keyword_extractor, 'all_skills') else None
+            canonical_keywords = self.keyword_canonicalizer.canonicalize_keywords(all_keywords, all_skills)
+            
+            # Map original keywords to canonical forms
+            keyword_to_canonical = {}
+            for original in all_keywords:
+                # Find the best canonical form for each original keyword
+                best_match = self._find_best_canonical_match(original, canonical_keywords)
+                keyword_to_canonical[original] = best_match
+                
+            # Create modified keywords_generator using canonicalized forms
+            modified_keywords = []
+            for job_title, original_kws in original_keywords_by_job.items():
+                canonical_kws = [keyword_to_canonical.get(kw, kw) for kw in original_kws]
+                # Remove duplicates that might have been introduced through canonicalization
+                canonical_kws = list(dict.fromkeys(canonical_kws))
+                modified_keywords.append((original_kws, canonical_kws))
+                
+            # Now create TF-IDF matrix using canonicalized keywords
+            dtm, features = self._create_tfidf_matrix(modified_keywords)
+
+            # Calculate scores using streaming approach with canonicalized keywords
+            results = list(
+                self._calculate_scores(dtm, features, modified_keywords, chunk)
+            )
 
             df = pd.DataFrame(results)
             if df.empty:
@@ -1708,32 +2141,99 @@ class OptimizedATS:
             )
             summary_chunk.columns = ["Total_Score", "Avg_Score", "Job_Count"]
             details_chunk = df
-            return summary_chunk, details_chunk  # Return the DataFrames
+            return summary_chunk, details_chunk
         except Exception as e:
             logger.exception(f"Error processing chunk: {e}")
             raise  # Always raise the exception
+    
+    def _find_best_canonical_match(self, original: str, canonical_keywords: List[str]) -> str:
+        """
+        Find the best matching canonical form for an original keyword.
+        
+        Args:
+            original: The original keyword
+            canonical_keywords: List of canonical keyword forms
+            
+        Returns:
+            The best matching canonical form or the original if no match found
+        """
+        # If the original is already in the canonical list, use it
+        if original in canonical_keywords:
+            return original
+            
+        original_doc = self.nlp(original)
+        if not original_doc.has_vector:
+            return original
+            
+        # Compare embeddings to find the most similar canonical form
+        best_similarity = -1
+        best_match = original
+        
+        for canonical in canonical_keywords:
+            canonical_doc = self.nlp(canonical)
+            if canonical_doc.has_vector:
+                similarity = original_doc.similarity(canonical_doc)
+                if similarity > best_similarity and similarity >= self.config.get("canonicalization", {}).get("similarity_threshold", 0.85):
+                    best_similarity = similarity
+                    best_match = canonical
+                    
+        return best_match
 
     def _calc_metrics(self, chunk_results: Tuple[pd.DataFrame, pd.DataFrame]) -> Dict:
         start_time = time.time()
         summary, _ = chunk_results
+
         # Calculate recall against the *original* set of skills (before expansion)
         original_skills = set()
         for category_skills in self.config["keyword_categories"].values():
             original_skills.update(s.lower() for s in category_skills)
 
-        recall = (
-            len(set(summary.index.str.lower()) & original_skills) / len(original_skills)
+        # Calculate recall against the *expanded* set of skills
+        expanded_skills = set(s.lower() for s in self.keyword_extractor.all_skills)
+
+        # Extract lowercased keywords from summary
+        extracted_keywords = set(summary.index.str.lower())
+
+        # Calculate metrics
+        original_recall = (
+            len(extracted_keywords & original_skills) / len(original_skills)
             if original_skills
             else 0
         )
+
+        expanded_recall = (
+            len(extracted_keywords & expanded_skills) / len(expanded_skills)
+            if expanded_skills
+            else 0
+        )
+
+        # Assuming we're working with the expanded set for relevance judgment
+        # For precision: what percentage of extracted keywords are in our expanded set
+        precision = (
+            len(extracted_keywords & expanded_skills) / len(extracted_keywords)
+            if extracted_keywords
+            else 0
+        )
+
+        # Calculate F1 score (harmonic mean of precision and expanded_recall)
+        f1_score = (
+            2 * precision * expanded_recall / (precision + expanded_recall)
+            if precision + expanded_recall > 0
+            else 0
+        )
+
         # Prevent division by zero by checking both emptiness and length
         time_per_job = (
             (time.time() - start_time) / len(summary)
             if not summary.empty and len(summary) > 0
             else 0.5
         )
+
         return {
-            "recall": recall,
+            "original_recall": original_recall,
+            "expanded_recall": expanded_recall,  # This will be our primary recall metric
+            "precision": precision,
+            "f1_score": f1_score,
             "memory": psutil.virtual_memory().percent,
             "time_per_job": time_per_job,
         }
@@ -1741,8 +2241,10 @@ class OptimizedATS:
     def _calc_reward(self, metrics: Dict) -> float:
         weights = self.config["optimization"]["reward_weights"]
         scale = self.config["optimization"].get("memory_scale_factor", 100)
+
+        # Use expanded_recall instead of recall in reward calculation
         return (
-            metrics["recall"] * weights["recall"]
+            metrics["expanded_recall"] * weights["recall"]
             - metrics["memory"] / scale * weights["memory"]
             - metrics["time_per_job"] * weights["time"]
         )
@@ -1813,7 +2315,7 @@ class OptimizedATS:
             if "sentencizer" not in nlp.pipe_names:
                 nlp.add_pipe("sentencizer")
             if "lemmatizer" not in nlp.pipe_names:
-                nlp.add_pipe("lemmatizer", config={"mode": "rule"})
+                nlp.add_pipe("lemmatizer")
             return nlp
         except OSError:
             return None
@@ -1827,78 +2329,348 @@ class OptimizedATS:
             return False
 
     def _load_and_configure_spacy_model(self):
-        """Loads spaCy model, disabling unnecessary components dynamically."""
+        """Loads spaCy model with improved error handling and validation."""
         model_name = self.config["text_processing"]["spacy_model"]
         enabled_components = self.config["text_processing"]["spacy_pipeline"].get(
             "enabled_components", []
         )
-        enabled = set(enabled_components)
-
-        # Dynamically determine required components
-        required = {"tok2vec", "tagger"}
-        if "lemmatizer" in enabled:
-            required.update(
-                spacy.info(model_name).get("dependencies", {}).get("lemmatizer", [])
+        
+        # Check GPU configuration
+        use_gpu = self.config["hardware_limits"].get("use_gpu", True)
+        if use_gpu:
+            try:
+                # Only try GPU if available
+                if torch.cuda.is_available():
+                    logger.info("GPU detected, enabling for spaCy if possible")
+                    # Explicit CUDA memory check
+                    free_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
+                    if free_mem < 1e9:  # Less than 1GB free
+                        logger.warning(f"Low GPU memory ({free_mem/1e9:.2f}GB free), using CPU instead")
+                        spacy.require_cpu()
+                        use_gpu = False
+                else:
+                    logger.info("No GPU detected, using CPU")
+                    use_gpu = False
+                    spacy.require_cpu()
+            except Exception as e:
+                logger.warning(f"GPU detection failed: {e}. Falling back to CPU")
+                use_gpu = False
+                spacy.require_cpu()
+        
+        # Validate and update required components
+        required_components = {"tok2vec", "tagger", "lemmatizer"}
+        missing_components = required_components - set(enabled_components)
+        if missing_components:
+            logger.warning(
+                f"Adding missing required components to pipeline: {missing_components}"
             )
-
-        all_pipes = set(spacy.info(model_name)["pipelines"])
-        disabled = list(all_pipes - enabled - required)
-
+            enabled_components.extend(missing_components)
+        
+        self.config["text_processing"]["spacy_pipeline"]["enabled_components"] = enabled_components
+        
+        # Try to load the model with retries
+        try:
+            nlp = self._load_model_with_retries(model_name, enabled_components, use_gpu)
+            
+            # Validate the loaded pipeline
+            self._validate_spacy_pipeline(nlp, model_name)
+            
+            # Add any missing critical components
+            self._add_essential_components(nlp, enabled_components)
+            
+            logger.info(
+                f"Loaded spaCy model: {model_name} with pipeline: {nlp.pipe_names}, "
+                f"GPU enabled: {use_gpu}"
+            )
+            return nlp
+            
+        except Exception as e:
+            logger.critical(f"SpaCy model initialization failed: {e}")
+            raise ConfigError(f"SpaCy initialization failed: {e}") from e
+    
+    def _load_model_with_retries(self, model_name, enabled_components, use_gpu):
+        """Load model with retries and fallback to CPU if GPU fails."""
         max_retries = 3
         retry_delay = 5
-
+        
         for attempt in range(max_retries):
             try:
-                nlp = spacy.load(model_name, disable=disabled)
-                if "sentencizer" not in nlp.pipe_names:
-                    nlp.add_pipe("sentencizer")
-                if "lemmatizer" not in nlp.pipe_names and "lemmatizer" in enabled:
-                    nlp.add_pipe("lemmatizer", config={"mode": "rule"})
-                logger.info(
-                    f"Loaded spaCy model: {model_name} with pipeline: {nlp.pipe_names}"
-                )
+                disabled_components = self._get_disabled_components(model_name, enabled_components)
+                
+                # Handle GPU-specific configuration before loading
+                if use_gpu and attempt == 0:
+                    # Set GPU allocator if available
+                    if hasattr(spacy, "prefer_gpu") and callable(spacy.prefer_gpu):
+                        spacy.prefer_gpu()
+                
+                # Try to load the model
+                nlp = spacy.load(model_name, disable=disabled_components)
+                
+                # Successfully loaded
                 return nlp
+                
             except OSError as e:
-                logger.warning(
-                    f"Failed to load spaCy model '{model_name}' (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                logger.info(f"Attempting to download spaCy model: {model_name}")
-                if self._download_model(model_name):
-                    if not spacy.util.is_package(model_name):  # Verify installation
-                        logger.error(f"Downloaded model '{model_name}' appears invalid")
-                        continue
-                if attempt < max_retries - 1:
-                    logger.info(f"Retrying in {retry_delay} seconds...")
+                # Handle different error scenarios
+                if "CUDA out of memory" in str(e) or "CUDNN_STATUS_NOT_INITIALIZED" in str(e):
+                    if attempt < max_retries - 1:
+                        logger.warning(f"GPU memory error, retrying with CPU (attempt {attempt + 1})")
+                        spacy.require_cpu()
+                        use_gpu = False
+                        torch.cuda.empty_cache()
+                        time.sleep(retry_delay)
+                    else:
+                        logger.error("GPU memory issues persisted after retries")
+                        raise
+                elif "E050" in str(e) and attempt == 0:
+                    # Missing model error, try to download
+                    logger.info(f"Model {model_name} not found, attempting download")
+                    if self._download_model(model_name):
+                        continue  # Try loading again
+                    else:
+                        raise ConfigError(f"Failed to download model '{model_name}'")
+                elif attempt < max_retries - 1:
+                    # Other errors, general retry
+                    logger.warning(f"Error loading model (attempt {attempt + 1}): {e}")
                     time.sleep(retry_delay)
                 else:
-                    logger.error(
-                        f"Failed to load/download '{model_name}' after {max_retries} retries"
-                    )
+                    # Last attempt failed
+                    logger.error(f"Failed to load model after {max_retries} attempts")
                     raise
+    
+    def _get_disabled_components(self, model_name, enabled_components):
+        """Get components to disable based on enabled components and model info."""
+        try:
+            # Get model info to determine available components
+            all_components = set()
+            
+            # Try to use spacy.info if available (spaCy v3+)
+            try:
+                model_info = spacy.info(model_name)
+                all_components = set(model_info.get("pipeline", []))
+            except (AttributeError, KeyError):
+                # Fallback for older spaCy or if info not available
+                logger.warning("Could not determine model pipeline components")
+                
+            # Calculate components to disable
+            disabled = list(all_components - set(enabled_components))
+            logger.debug(f"Disabling components: {disabled}")
+            return disabled
+            
+        except Exception as e:
+            logger.warning(f"Error determining components to disable: {e}")
+            return []  # Safe fallback: disable nothing, let spaCy handle it
+    
+    def _validate_spacy_pipeline(self, nlp, model_name):
+        """Validate the loaded spaCy pipeline against requirements."""
+        # 1. Check for critical components
+        essential_pipes = {"tagger", "lemmatizer"}
+        missing_pipes = essential_pipes - set(nlp.pipe_names)
+        
+        if missing_pipes:
+            logger.warning(
+                f"Model {model_name} missing critical components: {missing_pipes}. "
+                "Some functionality may be limited."
+            )
+        
+        # 2. Validate POS tags if the model has a tagger
+        if "tagger" in nlp.pipe_names and self.config["text_processing"].get("pos_filter"):
+            try:
+                model_tagger = nlp.get_pipe("tagger")
+                configured_pos_tags = set(self.config["text_processing"].get("pos_filter", []))
+                
+                # Different ways to get tagger labels depending on spaCy version
+                if hasattr(model_tagger, "labels"):
+                    model_pos_tags = set(model_tagger.labels)
+                else:
+                    # Fallback for older spaCy
+                    # Create a simple doc to extract POS tags
+                    doc = nlp("The quick brown fox jumps over the lazy dog.")
+                    model_pos_tags = {token.pos_ for token in doc}
+                
+                unsupported_tags = configured_pos_tags - model_pos_tags
+                if unsupported_tags:
+                    logger.warning(
+                        f"Model {model_name} may not support these POS tags: {unsupported_tags}. "
+                        f"Available tags: {model_pos_tags}. "
+                        "POS filtering may not work as expected."
+                    )
+            except Exception as e:
+                logger.warning(f"Could not validate POS tags: {e}")
+    
+    def _add_essential_components(self, nlp, enabled_components):
+        """Add essential components and resolve dependencies."""
+        # Define component dependencies
+        component_deps = {
+            'lemmatizer': ['tagger'],  
+            'entity_ruler': ['tok2vec'],
+            'sentencizer': [],  # No dependencies
+            'ner': ['tok2vec'],
+        }
+        
+        # Add sentencizer if needed and not present
+        if "sentencizer" not in nlp.pipe_names and "sentencizer" in enabled_components:
+            try:
+                nlp.add_pipe("sentencizer")
+                logger.info("Added sentencizer to pipeline")
+            except Exception as e:
+                logger.warning(f"Could not add sentencizer: {e}")
+        
+        # Add entity_ruler if needed and not present
+        if "entity_ruler" not in nlp.pipe_names and "entity_ruler" in enabled_components:
+            try:
+                config = {"phrase_matcher_attr": "LOWER", "validate": True}
+                # Check if 'ner' exists to decide where to add entity_ruler
+                position = "before" if "ner" in nlp.pipe_names else "last"
+                target = "ner" if position == "before" else None
+                
+                nlp.add_pipe("entity_ruler", config=config, before=target if position == "before" else None)
+                logger.info("Added entity_ruler to pipeline")
+            except Exception as e:
+                logger.warning(f"Could not add entity_ruler: {e}")
+        
+        # Add lemmatizer if needed
+        if "lemmatizer" not in nlp.pipe_names and "lemmatizer" in enabled_components:
+            try:
+                if "tagger" in nlp.pipe_names:  # Check dependency
+                    nlp.add_pipe("lemmatizer")
+                    logger.info("Added lemmatizer to pipeline")
+                else:
+                    logger.warning("Cannot add lemmatizer: missing dependency 'tagger'")
+            except Exception as e:
+                logger.warning(f"Could not add lemmatizer: {e}")
+
+    def _download_model(self, model_name):
+        """Download a spaCy model."""
+        try:
+            logger.info(f"Downloading spaCy model: {model_name}")
+            spacy.cli.download(model_name)
+            return True
+        except Exception as e:
+            logger.error(f"Error downloading model {model_name}: {e}")
+            return False
 
     def _add_entity_ruler(self, nlp):
+        """Add entity ruler with skill patterns and section headings to the pipeline."""
         if "entity_ruler" not in nlp.pipe_names:
-            ruler = nlp.add_pipe(
-                "entity_ruler",
-                config={"phrase_matcher_attr": "LOWER", "validate": True},
-                before="ner",
-            )
+            # Use configuration parameters if available
+            config = {"phrase_matcher_attr": "LOWER", "validate": True}
+            
+            # Determine best position for the ruler
+            if "ner" in nlp.pipe_names:
+                ruler = nlp.add_pipe("entity_ruler", config=config, before="ner")
+                logger.info("Added entity_ruler before NER component")
+            else:
+                ruler = nlp.add_pipe("entity_ruler", config=config)
+                logger.info("Added entity_ruler to pipeline (NER not present)")
         else:
             ruler = nlp.get_pipe("entity_ruler")
-
+            logger.info("Using existing entity_ruler component")
+        
+        # Create section patterns
         section_patterns = [
             {"label": "SECTION", "pattern": [{"LOWER": heading.lower()}]}
-            for heading in self.config["advanced"]["section_headings"]
+            for heading in self.config["advanced"].get("section_headings", [])
         ]
+        
+        # Create skill patterns
         unique_skills = set()
         for terms in self.config["keyword_categories"].values():
             unique_skills.update(terms)
+        
+        # Create and validate skill patterns
         skill_patterns = [
             {"label": "SKILL", "pattern": [{"LOWER": skill.lower()}]}
             for skill in unique_skills
         ]
-        ruler.add_patterns(section_patterns + skill_patterns)
-        logger.info(f"Added {len(unique_skills)} unique skill patterns to entity ruler")
+        
+        # Validate patterns
+        valid_section_patterns = [p for p in section_patterns if self._validate_pattern(p)]
+        valid_skill_patterns = [p for p in skill_patterns if self._validate_pattern(p)]
+        
+        # Log validation results
+        skipped_section_count = len(section_patterns) - len(valid_section_patterns)
+        skipped_skill_count = len(skill_patterns) - len(valid_skill_patterns)
+        
+        if skipped_section_count > 0:
+            logger.warning(f"Skipped {skipped_section_count} invalid section patterns")
+        
+        if skipped_skill_count > 0:
+            if skipped_skill_count < 10 or skipped_skill_count < len(skill_patterns) * 0.05:
+                logger.warning(f"Skipped {skipped_skill_count} invalid skill patterns")
+            else:
+                # More significant warning for larger numbers of invalid patterns
+                logger.error(
+                    f"High number of invalid skill patterns: {skipped_skill_count} "
+                    f"({skipped_skill_count/len(skill_patterns):.1%}). Check skill data source."
+                )
+        
+        # Add patterns to ruler
+        ruler.add_patterns(valid_section_patterns + valid_skill_patterns)
+        
+        # Diagnostic logging
+        logger.info(
+            f"Added {len(valid_section_patterns)} section patterns and "
+            f"{len(valid_skill_patterns)} skill patterns to entity ruler"
+        )
+        
+        # Check ruler position for optimal performance
+        if "ner" in nlp.pipe_names:
+            try:
+                ruler_idx = nlp.pipe_names.index("entity_ruler")
+                ner_idx = nlp.pipe_names.index("ner")
+                if ruler_idx > ner_idx:
+                    logger.warning(
+                        "Entity ruler positioned after NER component. "
+                        "For best results, entity_ruler should be before NER. "
+                        "Consider reinitializing with correct pipeline order."
+                    )
+            except ValueError:
+                # This should not happen as we already checked for presence
+                pass
+
+    def _validate_pattern(self, pattern: dict) -> bool:
+        """
+        Validate a spaCy entity ruler pattern structure.
+        
+        Args:
+            pattern: The pattern dictionary to validate
+            
+        Returns:
+            bool: True if pattern is valid, False otherwise
+        """
+        try:
+            # Check basic structure
+            if not isinstance(pattern, dict):
+                return False
+            
+            # Check required keys
+            if not all(key in pattern for key in ["label", "pattern"]):
+                return False
+                
+            # Validate label
+            if not isinstance(pattern["label"], str) or not pattern["label"].strip():
+                return False
+                
+            # Validate pattern
+            if not isinstance(pattern["pattern"], list) or not pattern["pattern"]:
+                return False
+                
+            # Validate each token dict in the pattern
+            for token in pattern["pattern"]:
+                # Each token must be a non-empty dict with at least one attribute
+                if not isinstance(token, dict) or not token:
+                    return False
+                    
+                # At least one valid matcher attribute should be present
+                valid_attrs = {"TEXT", "LOWER", "LEMMA", "POS", "TAG", "DEP", "OP", "IS_SENT_START"}
+                if not any(attr in token for attr in valid_attrs):
+                    return False
+                    
+            return True
+            
+        except (KeyError, TypeError, AttributeError) as e:
+            logger.debug(f"Pattern validation error: {e}")
+            return False
 
     def _init_categories(self):
         self.keyword_extractor._init_categories()
@@ -1909,6 +2681,7 @@ class OptimizedATS:
         summary_chunks: List[pd.DataFrame],
         details_chunks: List[pd.DataFrame],
     ):
+        logger.info("Starting intermediate save", batch_idx=batch_idx)
         if not self.config["intermediate_save"]["enabled"]:
             return
 
@@ -1923,7 +2696,7 @@ class OptimizedATS:
             self.working_dir / f"{self.run_id}_chunk_details_{batch_idx}{suffix}"
         )
 
-        checksums = {}  # Dictionary to store checksums, will be written line by line
+        checksums = {}  # Dictionary to store checksums
 
         def save_and_verify(path, data, save_func, append=False, max_retries=3):
             for attempt in range(max_retries):
@@ -1945,9 +2718,6 @@ class OptimizedATS:
 
         try:
             if format_type == "feather":
-                summary_schema = None
-                details_schema = None
-
                 for i, (summary_chunk, details_chunk) in enumerate(
                     zip(summary_chunks, details_chunks)
                 ):
@@ -1967,126 +2737,61 @@ class OptimizedATS:
                             lambda p, d, a: feather.write_feather(d, p),
                             append=False,
                         )
+                    else:  # Subsequent chunks: append, with fallback
+                        def append_to_feather(path, df, append):
+                            try:
+                                if append:
+                                    # Read existing data, concat, then overwrite
+                                    existing_df = pd.read_feather(path)
+                                    new_df = pd.concat([existing_df, df], ignore_index=True)
+                                    feather.write_feather(new_df, path)
+                                else:
+                                     feather.write_feather(df, path)
 
-                        # Store schema for future appends (correctly using PyArrow API)
-                        try:
-                            summary_schema = pq.ParquetFile(summary_path).schema_arrow
-                            details_schema = pq.ParquetFile(details_path).schema_arrow
-                        except Exception as e:
-                            logger.warning(
-                                f"Could not read schema from initial files: {e}"
-                            )
-                            # Continue without schema - will use schema inference
-
-                    else:  # Subsequent chunks: append using ParquetWriter
-
-                        def append_to_parquet(path, df, append, schema=None):
-                            if append:
-                                try:
-                                    # Create table from DataFrame
-                                    table = pa.Table.from_pandas(
-                                        df, preserve_index=False
-                                    )
-
-                                    # If schema provided, validate compatibility
-                                    if schema is not None:
-                                        # Check compatibility - basic field count check
-                                        if len(table.schema) != len(schema):
-                                            logger.warning(
-                                                f"Schema field count mismatch. Expected {len(schema)}, got {len(table.schema)}. Using DataFrame schema."
-                                            )
-                                        else:
-                                            # Use the stored schema for consistency
-                                            writer_schema = schema
-                                    else:
-                                        # Fall back to table's schema if no stored schema
-                                        writer_schema = table.schema
-
-                                    # Write with appropriate compression based on available options
-                                    compression = (
-                                        "ZSTD"
-                                        if "ZSTD" in pq.compression_codecs
-                                        else "SNAPPY"
-                                    )
-                                    with pq.ParquetWriter(
-                                        path,
-                                        writer_schema,
-                                        append=True,
-                                        compression=compression,
-                                    ) as writer:
-                                        writer.write_table(table)
-
-                                except Exception as e:
-                                    logger.error(
-                                        f"Error appending to Parquet file {path}: {e}"
-                                    )
-                                    # Fall back to creating a new file with a modified name if append fails
-                                    fallback_path = Path(str(path) + f".part{i}")
-                                    logger.warning(
-                                        f"Creating fallback file at {fallback_path}"
-                                    )
-                                    feather.write_feather(df, fallback_path)
-                                    return xxhash.xxh3_64(
-                                        str(fallback_path).encode()
-                                    ).hexdigest()
-                            else:
-                                feather.write_feather(df, path)
-
+                            except Exception as e:
+                                logger.error(f"Error appending to Feather file {path}: {e}")
+                                # Fallback: Create a new file with .part{i} suffix
+                                fallback_path = Path(str(path) + f".part{i}")
+                                logger.warning(
+                                    f"Appending to {path} failed. Creating fallback file at {fallback_path}"
+                                )
+                                feather.write_feather(df, fallback_path)
+                                return xxhash.xxh3_64(str(fallback_path).encode()).hexdigest()  # Unique ID
                             return self._calculate_file_checksum(path)
-
-                        # Pass schema to append function
                         checksums[str(summary_path)] = save_and_verify(
                             summary_path,
                             summary_chunk,
-                            lambda p, d, a: append_to_parquet(p, d, a, summary_schema),
-                            append=True,
+                            lambda p, d, a: append_to_feather(p, d, a),
+                            append=True
                         )
+
                         checksums[str(details_path)] = save_and_verify(
                             details_path,
                             details_chunk,
-                            lambda p, d, a: append_to_parquet(p, d, a, details_schema),
-                            append=True,
+                            lambda p, d, a: append_to_feather(p, d, a),
+                            append=True
                         )
+
             elif format_type == "jsonl":
                 for i, (summary_chunk, details_chunk) in enumerate(
                     zip(summary_chunks, details_chunks)
                 ):
                     append = i > 0
-                    if i == 0:
-                        checksums[str(summary_path)] = save_and_verify(
-                            summary_path,
-                            (r.to_dict() for _, r in summary_chunk.iterrows()),
-                            lambda p, d, a: srsly.write_jsonl(p, d, append=a),
-                            append=append,
-                        )
-                        checksums[str(details_path)] = save_and_verify(
-                            details_path,
-                            (r.to_dict() for _, r in details_chunk.iterrows()),
-                            lambda p, d, a: srsly.write_jsonl(p, d, append=a),
-                            append=append,
-                        )
-                    else:
-                        # Correctly pass append parameter to srsly.write_jsonl
-                        save_and_verify(
-                            summary_path,
-                            (r.to_dict() for _, r in summary_chunk.iterrows()),
-                            lambda p, d, a: srsly.write_jsonl(p, d, append=a),
-                            append=append,
-                        )
-                        save_and_verify(
-                            details_path,
-                            (r.to_dict() for _, r in details_chunk.iterrows()),
-                            lambda p, d, a: srsly.write_jsonl(p, d, append=a),
-                            append=append,
-                        )
+                    checksums[str(summary_path)] = save_and_verify(
+                        summary_path,
+                        (r.to_dict() for _, r in summary_chunk.iterrows()),
+                        lambda p, d, a: srsly.write_jsonl(p, d, append=a),
+                        append=append,
+                    )
+                    checksums[str(details_path)] = save_and_verify(
+                        details_path,
+                        (r.to_dict() for _, r in details_chunk.iterrows()),
+                        lambda p, d, a: srsly.write_jsonl(p, d, append=a),
+                        append=append,
+                    )
             else:  # json format
-                # For JSON format, we append by combining and rewriting
-                combined_summary = pd.concat(
-                    [chunk for chunk in summary_chunks]
-                ).reset_index()
-                combined_details = pd.concat(
-                    [chunk for chunk in details_chunks]
-                ).reset_index()
+                combined_summary = pd.concat(summary_chunks).reset_index()
+                combined_details = pd.concat(details_chunks).reset_index()
 
                 checksums[str(summary_path)] = save_and_verify(
                     summary_path,
@@ -2101,7 +2806,11 @@ class OptimizedATS:
                     append=False,
                 )
 
-            logger.info(f"Intermediate results saved to {self.working_dir}")
+            logger.info(
+                "Intermediate results saved",
+                batch_idx=batch_idx,
+                working_dir=str(self.working_dir),
+            )
 
             # Save the checksums to a manifest file
             self._save_checksum_manifest(checksums)
@@ -2110,17 +2819,19 @@ class OptimizedATS:
             logger.error(f"Failed to save intermediate results: {e}")
 
     def _verify_single_checksum(self, file_path: Path, expected_checksum: str) -> bool:
-        """Verifies the checksum of a single file."""
         if not file_path.exists():
-            logger.error(f"Intermediate file not found: {file_path}")
+            logger.error("Intermediate file not found", file_path=str(file_path))
             return False
         calculated_hash = self._calculate_file_checksum(file_path)
         if calculated_hash != expected_checksum:
             logger.error(
-                f"Checksum mismatch for {file_path}: expected {expected_checksum}, got {calculated_hash}"
+                "Checksum mismatch",
+                file_path=str(file_path),
+                expected_checksum=expected_checksum,
+                calculated_checksum=calculated_hash,
             )
             return False
-        logger.info(f"Checksum verified for: {file_path}")
+        logger.info("Checksum verified", file_path=str(file_path))
         return True
 
     def _calculate_file_checksum(self, file_path: Path) -> str:
@@ -2186,6 +2897,7 @@ class OptimizedATS:
     def _load_all_intermediate(
         self, batch_count: int
     ) -> Generator[Tuple[pd.DataFrame, pd.DataFrame], None, None]:
+        logger.info("Loading all intermediate results", batch_count=batch_count)
         """Loads intermediate results, yielding DataFrames for each batch."""
         format_type = self.config["intermediate_save"]["format"]
         suffix = {"feather": ".feather", "jsonl": ".jsonl", "json": ".json"}.get(
@@ -2243,6 +2955,7 @@ class OptimizedATS:
                         if not summary.empty and "Job_Count" in summary:
                             summary["Job_Count"] = summary["Job_Count"].astype(int)
 
+                        logger.info("Loaded intermediate results", batch_idx=i)
                         yield summary, details
                     except (
                         FileNotFoundError,
@@ -2321,107 +3034,195 @@ class OptimizedATS:
         if self.config["intermediate_save"]["cleanup"]:
             try:
                 shutil.rmtree(self.working_dir)
-                logger.info("Cleaned up intermediate directory: %s", self.working_dir)
-            except (OSError, IOError, PermissionError) as e:
-                logger.error("Failed to cleanup intermediate directory: %s", e)
-
-    def _create_tfidf_matrix(self, keyword_sets_tuples):
-        """Creates TF-IDF matrix, fitting only once (with optional sampling)."""
-        max_features = self.config["caching"].get("tfidf_max_features", 10000)
-        combined_sets = [list(set(o + e)) for o, e in keyword_sets_tuples]
-        all_keywords = [kw for subset in combined_sets for kw in subset]
-
-        if not hasattr(self, "tfidf_vectorizer"):
-            # Sample for large datasets
-            if len(all_keywords) > 100000:
                 logger.info(
-                    f"Sampling {100000} keywords for TF-IDF vocabulary (original size: {len(all_keywords)})"
+                    "Cleaned up intermediate directory",
+                    working_dir=str(self.working_dir),
                 )
-                all_keywords = random.sample(all_keywords, 100000)  # Sample 100k
+            except (OSError, IOError, PermissionError) as e:
+                logger.error("Failed to cleanup intermediate directory", error=str(e))
 
-            self.tfidf_vectorizer = TfidfVectorizer(
-                ngram_range=self.keyword_extractor.ngram_range,
-                max_features=max_features,
-                dtype=np.float32,
-                lowercase=False,
-                tokenizer=lambda x: x,
-                preprocessor=lambda x: x,
+    def _create_tfidf_matrix(self, keyword_sets_tuples_generator):
+        """Creates TF-IDF matrix using memory-efficient HashingVectorizer. Accepts a generator."""
+        max_features = self.config["caching"].get("tfidf_max_features", 10000)
+
+        # Process the generator safely
+        keyword_sets_list = []
+        indices = []
+        
+        try:
+            for i, (original_tokens, expanded_keywords) in enumerate(keyword_sets_tuples_generator):
+                combined = list(set(original_tokens + expanded_keywords))
+                if combined:  # Only add non-empty keyword sets
+                    keyword_sets_list.append(combined)
+                    indices.append(i)
+
+            if not keyword_sets_list:
+                logger.warning("Empty keyword sets for HashingVectorizer")
+                return None, []
+
+            # Check memory before proceeding
+            mem_usage = psutil.virtual_memory().percent
+            memory_threshold = self.config["hardware_limits"].get("memory_threshold", 70)
+            if mem_usage > memory_threshold:
+                logger.warning(f"Memory usage high ({mem_usage}%) before HashingVectorizer processing")
+                gc.collect()  # Attempt to free memory
+
+            # Initialize HashingVectorizer if not already done
+            if not hasattr(self, "hashing_vectorizer"):
+                self.hashing_vectorizer = HashingVectorizer(
+                    ngram_range=self.keyword_extractor.ngram_range,
+                    n_features=max_features,
+                    dtype=np.float32,
+                    lowercase=False,  # Already lowercased during preprocessing
+                    tokenizer=lambda x: x,  # Pass tokens directly
+                    preprocessor=lambda x: x,  # No additional preprocessing
+                    norm='l2',  # Ensure consistent normalization
+                    alternate_sign=False,  # Prevent feature cancellation
+                )
+
+            # Process all at once for efficiency
+            dtm = self.hashing_vectorizer.transform(keyword_sets_list)
+            
+            # Return matrix and indices (feature names not available with HashingVectorizer)
+            return dtm, indices
+
+        except MemoryError as e:
+            logger.error(f"Memory error in HashingVectorizer: {e}")
+            gc.collect()
+            return None, []
+        except Exception as e:
+            logger.exception(f"Unexpected error in HashingVectorizer processing: {e}")
+            return None, []
+
+    def _calculate_scores(self, dtm, feature_names, keyword_sets_generator, job_descriptions):
+        """Calculates scores with hashing vectorizer support."""
+        if dtm is None:
+            logger.error("DTM is None, cannot calculate scores")
+            return
+            
+        try:
+            # Convert to COO format for efficient iteration
+            dtm_coo = dtm.tocoo()
+            job_descriptions_list = list(job_descriptions.items())
+            weighting = self.config.get(
+                "weighting",
+                {"tfidf_weight": 0.7, "frequency_weight": 0.3, "whitelist_boost": 1.5},
             )
-            self.tfidf_vectorizer.fit(all_keywords)  # Fit on sampled keywords
-        dtm = self.tfidf_vectorizer.transform(combined_sets)
-        return dtm, self.tfidf_vectorizer.get_feature_names_out()
 
-    def _calculate_scores(self, dtm, feature_names, keyword_sets, job_descriptions):
-        """Calculates scores, yielding result dictionaries for each keyword."""
-        dtm_coo = dtm.tocoo()
-        job_descriptions_list = list(job_descriptions.items())
-        weighting = self.config.get(
-            "weighting",
-            {"tfidf_weight": 0.7, "frequency_weight": 0.3, "whitelist_boost": 1.5},
+            # Build lookup dictionaries for efficient processing
+            keyword_sets_dict, index_to_keywords = self._build_keyword_lookups(keyword_sets_generator)
+            
+            # Track processed terms to avoid duplicates
+            processed_terms_by_job = defaultdict(set)
+            
+            # Process the sparse matrix entries
+            for row, col, value in zip(dtm_coo.row, dtm_coo.col, dtm_coo.data):
+                try:
+                    job_index = row
+                    
+                    # Skip if job index is out of bounds
+                    if job_index >= len(job_descriptions_list):
+                        continue
+                        
+                    job_title, job_text = job_descriptions_list[job_index]
+                    
+                    # Skip if we don't have keywords for this job
+                    if job_index not in keyword_sets_dict:
+                        continue
+
+                    original_tokens, expanded_keywords = keyword_sets_dict[job_index]
+                    
+                    # Process each term from this job's keywords
+                    for term in self._get_job_terms(original_tokens, expanded_keywords):
+                        # Skip duplicates within the same job
+                        if term in processed_terms_by_job[job_index]:
+                            continue
+                            
+                        processed_terms_by_job[job_index].add(term)
+                        
+                        # Generate result for this term and yield it
+                        result = self._generate_term_result(
+                            term, job_title, job_text, original_tokens, value, weighting
+                        )
+                        yield result
+
+                except Exception as e:
+                    logger.error(f"Error calculating score for row={row}, col={col}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.exception(f"Critical error in calculate_scores: {e}")
+            return
+
+    def _build_keyword_lookups(self, keyword_sets_generator):
+        """Builds lookup dictionaries for keywords."""
+        keyword_sets_dict = {}
+        index_to_keywords = {}
+        
+        for i, (original_tokens, expanded_keywords) in enumerate(keyword_sets_generator):
+            combined = list(set(original_tokens + expanded_keywords))
+            for term in combined:
+                # Store each term with its job index
+                if term not in index_to_keywords:
+                    index_to_keywords[term] = []
+                index_to_keywords[term].append(i)
+            keyword_sets_dict[i] = (original_tokens, expanded_keywords)
+            
+        return keyword_sets_dict, index_to_keywords
+        
+    def _get_job_terms(self, original_tokens, expanded_keywords):
+        """Get combined list of unique terms for a job."""
+        return list(set(original_tokens + expanded_keywords))
+
+    def _generate_term_result(self, term, job_title, job_text, original_tokens, tfidf_value, weighting):
+        """Generate result dictionary for a term."""
+        # Calculate base score
+        presence = 1 if term in original_tokens else 0
+        score = self._compute_base_score(tfidf_value, presence, weighting)
+        
+        # Apply whitelist boost
+        score = self._apply_whitelist_boost(term, score, weighting)
+        
+        # Apply section weights
+        score = self._apply_section_weight(term, job_text, score)
+        
+        # Create and return the result dictionary
+        return {
+            "Keyword": term,
+            "Job Title": job_title,
+            "Score": score,
+            "TF-IDF": tfidf_value,
+            "Frequency": presence,
+            "Category": self._categorize_term(term),
+            "In Whitelist": term.lower() in self.keyword_extractor.all_skills,
+        }
+        
+    def _compute_base_score(self, tfidf_value, presence, weighting):
+        """Compute base score from TF-IDF and presence."""
+        return (
+            weighting.get("tfidf_weight", 0.7) * tfidf_value
+            + weighting.get("frequency_weight", 0.3) * presence
         )
-
-        for row, col, value in zip(dtm_coo.row, dtm_coo.col, dtm_coo.data):
-            try:
-                job_index = row
-                term_index = col
-
-                # Check for index out of bounds errors
-                if job_index >= len(job_descriptions_list) or term_index >= len(
-                    feature_names
-                ):
-                    logger.warning(
-                        f"Index out of bounds: job_index={job_index}, term_index={term_index}"
-                    )
-                    continue
-
-                title = job_descriptions_list[job_index][0]
-                term = feature_names[term_index]
-
-                # Check if keyword_sets has the expected structure
-                if job_index >= len(keyword_sets):
-                    logger.warning(f"Keyword set index out of bounds: {job_index}")
-                    continue
-
-                original_tokens, expanded_keywords = keyword_sets[job_index]
-
-                presence = (
-                    1
-                    if isinstance(original_tokens, list) and term in original_tokens
-                    else 0
-                )  # Use original tokens
-                score = (
-                    weighting.get("tfidf_weight", 0.7) * value
-                    + weighting.get("frequency_weight", 0.3) * presence
-                )
-                term_lower = term.lower()
-
-                # Apply whitelist boost if the term is in the *expanded* set of skills:
-                if term_lower in self.keyword_extractor.all_skills:
-                    score *= weighting.get("whitelist_boost", 1.5)
-                section_weights = self.config["weighting"].get("section_weights", {})
-                job_text = job_descriptions_list[job_index][1]
-
-                section = self.keyword_extractor._detect_keyword_section(term, job_text)
-                score *= section_weights.get(
-                    section,
-                    section_weights.get("default", 1.0),
-                )
-
-                result = {
-                    "Keyword": term,
-                    "Job Title": title,
-                    "Score": score,
-                    "TF-IDF": value,
-                    "Frequency": presence,
-                    "Category": self.keyword_extractor._categorize_term(term),
-                    "In Whitelist": term_lower in self.keyword_extractor.all_skills,
-                }
-                yield result
-
-            except Exception as e:
-                logger.error(f"Error calculating score for row={row}, col={col}: {e}")
-                # No yield here - just skip this item and continue with the next one
-
+        
+    def _apply_whitelist_boost(self, term, score, weighting):
+        """Apply whitelist boost if term is in whitelist."""
+        term_lower = term.lower()
+        if term_lower in self.keyword_extractor.all_skills:
+            return score * weighting.get("whitelist_boost", 1.5)
+        return score
+        
+    def _apply_section_weight(self, term, job_text, score):
+        """Apply section-specific weight modifier to score."""
+        section_weights = self.config["weighting"].get("section_weights", {})
+        section = self.keyword_extractor._detect_keyword_section(term, job_text)
+        return score * section_weights.get(
+            section,
+            section_weights.get("default", 1.0),
+        )
+        
+    def _categorize_term(self, term):
+        """Categorize a term according to the defined categories."""
+        return self.keyword_extractor._semantic_categorization(term)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="ATS Keyword Optimizer")
@@ -2430,7 +3231,7 @@ def parse_arguments():
     )
     parser.add_argument("-c", "--config", default="config.yaml", help="Config file")
     parser.add_argument("-o", "--output", default="results.xlsx", help="Output file")
-    return parser.parse_args()
+    return parser.parse_args()  # Fixed: changed parser.args() to parser.parse_args()
 
 
 def initialize_analyzer(config_path: str):
@@ -2445,10 +3246,32 @@ def save_results(summary: pd.DataFrame, details: pd.DataFrame, output_file: str)
         if shutil.disk_usage(working_dir).free < 1000000000:
             logger.warning("Low disk space in working directory")
 
-        with pd.ExcelWriter(output_file) as writer:
-            summary.to_excel(writer, sheet_name="Summary")
-            details.to_excel(writer, sheet_name="Detailed Scores")
-        logger.info("Analysis complete. Results saved to %s", output_file)
+        # Use a temporary file for atomic write
+        with tempfile.NamedTemporaryFile(
+            mode="w+b", suffix=".tmp", dir=working_dir, delete=False
+        ) as temp_file:
+            temp_filepath = Path(temp_file.name)
+            try:
+                with pd.ExcelWriter(temp_filepath) as writer:
+                    summary.to_excel(writer, sheet_name="Summary")
+                    details.to_excel(writer, sheet_name="Detailed Scores")
+                # Atomically rename the temporary file to the final file
+                os.replace(temp_filepath, output_file)  # Use os.replace for atomicity
+                logger.info("Analysis complete. Results saved to %s", output_file)
+
+            except OSError as e:
+                if e.errno == errno.ENOSPC:  # No space left on device
+                    logger.error(f"Out of disk space while writing to {temp_filepath}")
+                    # Consider deleting the temporary file here
+                    temp_filepath.unlink(missing_ok=True)
+                    raise  # Re-raise the exception
+                else:
+                    logger.exception(
+                        "Failed to save results to temporary file %s: %s",
+                        temp_filepath,
+                        e,
+                    )
+                    raise
     except Exception as e:
         logger.exception("Failed to save results to %s: %s", output_file, e)
         raise
@@ -2476,7 +3299,13 @@ def load_job_data(input_file: str) -> Dict:
         logger.error("Input file not found: %s", input_file)
         raise
     except json.JSONDecodeError as e:
-        logger.error("Invalid JSON in %s: %s", input_file, e)
+        logger.error(
+            "Invalid JSON in %s (line %s, column %s): %s",
+            input_file,
+            e.lineno,
+            e.colno,
+            e.msg,
+        )
         raise
     except Exception as e:
         logger.exception("Unexpected error loading %s: %s", input_file, e)
