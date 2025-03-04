@@ -5,7 +5,7 @@ spacy==3.8.4
 pyyaml==6.0.2
 scikit-learn==1.6.1
 psutil==7.0.0
-pyarrow==14.0.1
+pyarrow==19.0.1
 xxhash==3.5.0
 scipy==1.15.2
 cachetools==5.0.0
