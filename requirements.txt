@@ -7,7 +7,7 @@ scikit-learn==1.6.1
 psutil==7.0.0
 pyarrow==14.0.1
 xxhash==3.5.0
-scipy==1.7.0
+scipy==1.15.2
 cachetools==5.0.0
 srsly==2.5.1
 rapidfuzz==3.12.2
