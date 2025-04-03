@@ -10,7 +10,7 @@ xxhash==3.5.0
 scipy==1.15.2
 cachetools==5.5.2
 srsly==2.5.1
-rapidfuzz==3.12.2
+rapidfuzz==3.13.0
 tenacity==9.1.2
 pydantic==2.11.2,<3
 pybktree==1.1
