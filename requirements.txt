@@ -1,7 +1,7 @@
 nltk==3.9.1
 numpy==2.2.5
 pandas==2.2.3
-spacy==3.8.5
+spacy==3.8.7
 pyyaml==6.0.2
 scikit-learn==1.6.1
 psutil==7.0.0
