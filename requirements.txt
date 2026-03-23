@@ -9,7 +9,7 @@ pyarrow==19.0.1
 xxhash==3.5.0
 scipy==1.15.2
 cachetools==5.5.2
-srsly==2.5.1
+srsly==2.5.3
 rapidfuzz==3.13.0
 tenacity==9.1.2
 pydantic==2.11.2,<3
